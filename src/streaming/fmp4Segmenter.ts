@@ -252,10 +252,6 @@ interface SegmenterState {
   // until it arrives.
   trackOffsetsInitialized: Set<number>;
 
-  // Per-track timescale values parsed from the moov box. Keyed by track_ID. Populated once when the moov box is received. Converts accumulated trun durations (in
-  // timescale units) to seconds for EXTINF: seconds = duration / timescale.
-  trackTimescales: Map<number, number>;
-
   // The audio track's timescale, detected from the moov box. Common values are 48000 (48kHz) and 44100 (44.1kHz). Used by frame duration normalization to skip audio
   // tracks (audio AAC frames have constant 1024-sample duration and don't need normalization). Zero if not detected.
   audioTimescale: number;
@@ -264,6 +260,10 @@ interface SegmenterState {
   // normalized durations exactly. Without this, Chrome's original tfdt values have gaps when frames are dropped, causing player stutter even after duration
   // normalization. Audio tracks are not tracked here — they use Chrome's original timestamps via the offset mechanism.
   normalizedVideoPositions: Map<number, bigint>;
+
+  // Per-track timescale values parsed from the moov box. Keyed by track_ID. Populated once when the moov box is received. Converts accumulated trun durations (in
+  // timescale units) to seconds for EXTINF: seconds = duration / timescale.
+  trackTimescales: Map<number, number>;
 
   // Per-track timestamp counters, keyed by track_ID. Each value is the next expected baseMediaDecodeTime (originalTfdt + offset + duration), used for tab replacement
   // handoff via getTrackTimestamps(). Audio and video tracks have separate counters because they may use different timescales (e.g., 90000 for video, 48000 for audio).
@@ -416,11 +416,11 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
       { malformedMoofCount: 0, syncSpreadCount: 0, syncSpreadMaxMs: 0, syncSpreadMinMs: Infinity, syncSpreadSumMs: 0, tabReplacementCount: 0 },
     stopped: false,
     totalKeyframeIntervalMs: 0,
+    audioTimescale: 0,
+    normalizedVideoPositions: initialTrackTimestamps ? new Map<number, bigint>(initialTrackTimestamps) : new Map<number, bigint>(),
     trackOffsets: new Map(),
     trackOffsetsInitialized: new Set(),
     trackTimescales: new Map(),
-    audioTimescale: 0,
-    normalizedVideoPositions: initialTrackTimestamps ? new Map(initialTrackTimestamps) : new Map(),
     trackTimestamps: initialTrackTimestamps ? new Map(initialTrackTimestamps) : new Map<number, bigint>()
   };
 

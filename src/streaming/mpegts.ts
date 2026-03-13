@@ -272,9 +272,14 @@ async function serveMpegTsStream(streamId: number, channelName: string, req: Req
 
     draining = false;
 
-    while(pendingSegments.length > 0 && !draining && !cleanedUp) {
+    while((pendingSegments.length > 0) && !draining && !cleanedUp) {
 
-      const segment = pendingSegments.shift()!;
+      const segment = pendingSegments.shift();
+
+      if(!segment) {
+
+        break;
+      }
       const ok = remuxer.stdin.write(segment);
 
       if(!ok) {

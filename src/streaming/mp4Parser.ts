@@ -788,17 +788,20 @@ export function normalizeMoofFrameDurations(moofData: Buffer, trackTimescales: M
       }
     });
 
-    // Advance the running position for this video track by the total normalized duration.
+    // Advance the running position for this video track by the total normalized duration. TypeScript's control flow analysis cannot track mutations made inside the
+    // iterateChildBoxes callback, so tfhdInfo appears "always null" to the linter despite being set at runtime.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if(isVideoTrack && tfhdInfo && (trackSampleCount > 0)) {
 
-      const timescale = trackTimescales.get((tfhdInfo as TfhdInfo).trackId);
+      const info = tfhdInfo as TfhdInfo;
+      const timescale = trackTimescales.get(info.trackId);
 
       if(timescale) {
 
         const constantDuration = BigInt(Math.round(timescale / targetFrameRate));
-        const currentPos = videoPositions.get((tfhdInfo as TfhdInfo).trackId) ?? 0n;
+        const currentPos = videoPositions.get(info.trackId) ?? 0n;
 
-        videoPositions.set((tfhdInfo as TfhdInfo).trackId, currentPos + (constantDuration * BigInt(trackSampleCount)));
+        videoPositions.set(info.trackId, currentPos + (constantDuration * BigInt(trackSampleCount)));
       }
     }
   });
