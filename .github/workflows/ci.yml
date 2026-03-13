@@ -124,9 +124,11 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            BUILD_FROM_SOURCE=${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
           tags: |
-            ghcr.io/${{ github.repository }}:${{ inputs.docker_tag || steps.version.outputs.VERSION }}
-            ${{ github.event_name == 'release' && format('ghcr.io/{0}:latest', github.repository) || '' }}
+            ghcr.io/mackid1993/prismcast:${{ inputs.docker_tag || steps.version.outputs.VERSION }}
+            ${{ github.event_name == 'release' && format('ghcr.io/mackid1993/prismcast:latest') || '' }}
 
   # Update the Homebrew formula in the tap repository.
   publish-homebrew:

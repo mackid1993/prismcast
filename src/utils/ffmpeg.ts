@@ -204,9 +204,11 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
     "-c:v", "copy",
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
-    "-flush_packets", "1"
+    "-flush_packets", "1",
+    "-max_muxing_queue_size", "1024"
   ];
 
   // Add metadata comment if provided. This embeds "PrismCast - <channel>" in the output for identification.
@@ -352,6 +354,7 @@ export function spawnMpegTsRemuxer(onError: (error: Error) => void, streamId?: s
     "-pat_period", "0.1",
     "-pcr_period", "40",
     "-flush_packets", "1",
+    "-max_muxing_queue_size", "1024",
     "pipe:1"
   ];
 
