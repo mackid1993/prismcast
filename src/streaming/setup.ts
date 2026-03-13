@@ -385,7 +385,6 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
       audio: true,
       audioBitsPerSecond: CONFIG.streaming.audioBitsPerSecond,
-      frameSize: 20,
       mimeType: captureMimeType,
       video: true,
       videoBitsPerSecond: CONFIG.streaming.videoBitsPerSecond,

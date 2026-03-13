@@ -504,9 +504,6 @@ export function buildLaunchOptions(): LaunchOptions {
      *
      * --disable-notifications: Prevents notification permission prompts and popups that could interfere with video capture or require user interaction.
      *
-     * --run-all-compositor-stages-before-draw: Forces the compositor to complete all rendering stages before producing each frame. Without this, Chrome may
-     *   skip compositor stages under load, producing incomplete frames that appear as visual stutter in the captured stream.
-     *
      * --hide-crash-restore-bubble: Suppresses the "Chrome didn't shut down correctly" dialog that appears after a crash. This prevents the dialog from
      *   blocking the viewport during capture.
      *
@@ -526,7 +523,6 @@ export function buildLaunchOptions(): LaunchOptions {
       "--disable-backgrounding-occluded-windows",
       "--disable-blink-features=AutomationControlled",
       "--disable-notifications",
-      "--run-all-compositor-stages-before-draw",
       "--hide-crash-restore-bubble",
       "--hide-scrollbars",
       "--no-first-run",
