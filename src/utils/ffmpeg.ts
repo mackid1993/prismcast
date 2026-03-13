@@ -176,7 +176,7 @@ export interface FFmpegProcess {
  * - `-hide_banner -loglevel warning`: Reduce noise, only show warnings/errors
  * - `-probesize 16384`: Limit input probing to 16KB (Chrome's WebM header fits well under this) to minimize startup delay
  * - `-i pipe:0`: Read input from stdin
- * - `-c:v libx264 -preset ultrafast -crf 0`: Lossless re-encode to enforce constant frame rate (Chrome's MediaRecorder outputs VFR)
+ * - `-c:v libx264 -preset ultrafast -b:v <bitrate>`: Re-encode to enforce constant frame rate at the user's configured bitrate (Chrome's MediaRecorder outputs VFR)
  * - `-r <frameRate>`: Output at the user's configured frame rate (e.g., 30, 60)
  * - `-c:a aac -b:a <bitrate>`: Transcode audio to AAC at specified bitrate
  * - `-af aresample=async=1`: Correct audio timestamp discontinuities from Chrome's MediaRecorder
@@ -186,13 +186,14 @@ export interface FFmpegProcess {
  * - `-max_muxing_queue_size 1024`: Prevent muxing buffer overflow during transcoding
  * - `pipe:1`: Write output to stdout
  * @param audioBitrate - Audio bitrate in bits per second (e.g., 256000 for 256 kbps).
+ * @param videoBitrate - Video bitrate in bits per second (e.g., 8000000 for 8 Mbps).
  * @param frameRate - Target video frame rate (e.g., 30, 60). Enforces constant frame rate output via re-encoding.
  * @param onError - Callback invoked when FFmpeg exits unexpectedly or encounters an error.
  * @param streamId - Stream identifier for logging.
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with stdin, stdout, and kill function.
  */
-export function spawnFFmpeg(audioBitrate: number, frameRate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
+export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
   // Use the cached FFmpeg path from resolveFFmpegPath(). This should always be set because isFFmpegAvailable() is called during startup, which populates the cache.
   // If somehow not set, fall back to "ffmpeg" and let spawn handle the error.
@@ -208,7 +209,7 @@ export function spawnFFmpeg(audioBitrate: number, frameRate: number, onError: (e
     "-i", "pipe:0",
     "-c:v", "libx264",
     "-preset", "ultrafast",
-    "-crf", "0",
+    "-b:v", String(videoBitrate),
     "-r", String(frameRate),
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
