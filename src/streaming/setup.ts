@@ -4,7 +4,7 @@
  */
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
-import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext, spawnFFmpeg, startTimer } from "../utils/index.js";
+import { LOG, createStreamSmoother, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext, spawnFFmpeg, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
 import { getNextStreamId, getStreamCount } from "./registry.js";
@@ -385,6 +385,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
       audio: true,
       audioBitsPerSecond: CONFIG.streaming.audioBitsPerSecond,
+      frameSize: 100,
       mimeType: captureMimeType,
       video: true,
       videoBitsPerSecond: CONFIG.streaming.videoBitsPerSecond,
@@ -505,9 +506,13 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         }
       });
 
-      // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup. When FFmpeg is killed during tab replacement, pipeline() automatically
-      // destroys the source stream, preventing "write after end" errors that would occur with .pipe().
-      pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+      // Insert a smoothing buffer between the capture stream and FFmpeg. puppeteer-stream's WebSocket delivery is bursty (50 micro-bursts/sec at 20ms timeslice,
+      // with no backpressure control). The smoother absorbs these bursts and drains at a consistent 50ms interval, converting irregular delivery into even pacing.
+      const smoother = createStreamSmoother();
+
+      // Pipe the WebM capture stream through the smoother to FFmpeg's stdin using pipeline() for proper cleanup. When FFmpeg is killed during tab replacement,
+      // pipeline() automatically destroys the source stream and smoother, preventing "write after end" errors that would occur with .pipe().
+      pipeline(stream as unknown as Readable, smoother, ffmpeg.stdin).catch((error: unknown) => {
 
         const errorMessage = formatError(error);
 
