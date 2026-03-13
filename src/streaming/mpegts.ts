@@ -237,6 +237,53 @@ async function serveMpegTsStream(streamId: number, channelName: string, req: Req
     }
   }, stream.streamIdStr);
 
+  // Queue of segments waiting to be written when FFmpeg stdin is under backpressure. When write() returns false, subsequent segments are queued here and drained
+  // when the 'drain' event fires.
+  const pendingSegments: Buffer[] = [];
+  let draining = false;
+
+  /**
+   * Writes a segment to FFmpeg stdin with backpressure handling. If the write buffer is full, the segment is queued and written when FFmpeg is ready.
+   */
+  function writeSegment(data: Buffer): void {
+
+    if(cleanedUp) {
+
+      return;
+    }
+
+    if(draining) {
+
+      pendingSegments.push(data);
+
+      return;
+    }
+
+    const ok = remuxer.stdin.write(data);
+
+    if(!ok) {
+
+      draining = true;
+    }
+  }
+
+  // Drain queued segments when FFmpeg stdin is ready for more data.
+  remuxer.stdin.on("drain", () => {
+
+    draining = false;
+
+    while(pendingSegments.length > 0 && !draining && !cleanedUp) {
+
+      const segment = pendingSegments.shift()!;
+      const ok = remuxer.stdin.write(segment);
+
+      if(!ok) {
+
+        draining = true;
+      }
+    }
+  });
+
   // Handler for new media segments. Writes each segment to FFmpeg stdin and updates the last access timestamp to prevent idle timeout.
   const onSegment = (filename: string, data: Buffer): void => {
 
@@ -246,7 +293,7 @@ async function serveMpegTsStream(streamId: number, channelName: string, req: Req
     }
 
     sentSegments.add(filename);
-    remuxer.stdin.write(data);
+    writeSegment(data);
     updateLastAccess(streamId);
   };
 
@@ -325,10 +372,10 @@ async function serveMpegTsStream(streamId: number, channelName: string, req: Req
   remuxer.stdout.pipe(res);
 
   // Write the init segment first — FFmpeg needs the ftyp and moov boxes before it can process any media segments.
-  remuxer.stdin.write(stream.hls.initSegment);
+  writeSegment(stream.hls.initSegment);
 
   // Write all existing media segments to provide immediate playback catchup. The sentSegments Set deduplicates against any segments received via the event handler
-  // during this iteration.
+  // during this iteration. Uses writeSegment() for backpressure handling — if FFmpeg can't keep up, segments are queued and drained when ready.
   for(const [ filename, data ] of stream.hls.segments) {
 
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
@@ -338,7 +385,7 @@ async function serveMpegTsStream(streamId: number, channelName: string, req: Req
     }
 
     sentSegments.add(filename);
-    remuxer.stdin.write(data);
+    writeSegment(data);
   }
 
   streamLog.debug("streaming:mpegts", "MPEG-TS client connected.");

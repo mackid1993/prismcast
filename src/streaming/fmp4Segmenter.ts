@@ -420,7 +420,7 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
     trackOffsetsInitialized: new Set(),
     trackTimescales: new Map(),
     audioTimescale: 0,
-    normalizedVideoPositions: new Map(),
+    normalizedVideoPositions: initialTrackTimestamps ? new Map(initialTrackTimestamps) : new Map(),
     trackTimestamps: initialTrackTimestamps ? new Map(initialTrackTimestamps) : new Map<number, bigint>()
   };
 
