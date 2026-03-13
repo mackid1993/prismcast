@@ -169,22 +169,24 @@ export interface FFmpegProcess {
 
 /**
  * Spawns an FFmpeg process configured to transcode WebM (H264+Opus) to fMP4 (H264+AAC). The process reads from stdin and writes to stdout, allowing it to be
- * integrated into a Node.js stream pipeline. Video is passed through unchanged; audio is transcoded from Opus to AAC for HLS compatibility.
+ * integrated into a Node.js stream pipeline. Video is re-encoded with lossless ultrafast x264 to enforce constant frame rate from Chrome's VFR MediaRecorder output.
+ * Audio is transcoded from Opus to AAC for HLS compatibility.
  *
  * FFmpeg arguments:
  * - `-hide_banner -loglevel warning`: Reduce noise, only show warnings/errors
- * - `-fflags +genpts`: Regenerate presentation timestamps to smooth Chrome's variable frame rate output
  * - `-probesize 16384`: Limit input probing to 16KB (Chrome's WebM header fits well under this) to minimize startup delay
  * - `-i pipe:0`: Read input from stdin
- * - `-r <frameRate>`: Enforce constant frame rate output to prevent VFR-induced playback stutter
- * - `-c:v copy`: Copy video stream without re-encoding (H264 passthrough)
+ * - `-c:v libx264 -preset ultrafast -crf 0`: Lossless re-encode to enforce constant frame rate (Chrome's MediaRecorder outputs VFR)
+ * - `-r <frameRate>`: Output at the user's configured frame rate (e.g., 30, 60)
  * - `-c:a aac -b:a <bitrate>`: Transcode audio to AAC at specified bitrate
+ * - `-af aresample=async=1`: Correct audio timestamp discontinuities from Chrome's MediaRecorder
  * - `-f mp4`: Output MP4 container format
- * - `-movflags frag_keyframe+empty_moov+default_base_moof`: Streaming-friendly fMP4 flags
+ * - `-movflags frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer`: Streaming-friendly fMP4 flags
  * - `-flush_packets 1`: Flush output immediately after each packet to minimize latency
+ * - `-max_muxing_queue_size 1024`: Prevent muxing buffer overflow during transcoding
  * - `pipe:1`: Write output to stdout
  * @param audioBitrate - Audio bitrate in bits per second (e.g., 256000 for 256 kbps).
- * @param frameRate - Target video frame rate (e.g., 30, 60). Used to enforce constant frame timing on Chrome's variable frame rate output.
+ * @param frameRate - Target video frame rate (e.g., 30, 60). Enforces constant frame rate output via re-encoding.
  * @param onError - Callback invoked when FFmpeg exits unexpectedly or encounters an error.
  * @param streamId - Stream identifier for logging.
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
@@ -202,10 +204,11 @@ export function spawnFFmpeg(audioBitrate: number, frameRate: number, onError: (e
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "warning",
-    "-fflags", "+genpts",
     "-probesize", "16384",
     "-i", "pipe:0",
-    "-c:v", "copy",
+    "-c:v", "libx264",
+    "-preset", "ultrafast",
+    "-crf", "0",
     "-r", String(frameRate),
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
