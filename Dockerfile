@@ -104,7 +104,8 @@ RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firm
 ARG BUILD_FROM_SOURCE=false
 COPY . /tmp/prismcast-src
 RUN if [ "$BUILD_FROM_SOURCE" = "true" ]; then \
-      cd /tmp/prismcast-src && npm ci && npm run build && npm install -g . ; \
+      cd /tmp/prismcast-src && npm ci && npm run build \
+      && npm pack && npm install -g prismcast-*.tgz ; \
     else \
       npm install -g prismcast ; \
     fi \
