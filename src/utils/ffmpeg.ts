@@ -267,7 +267,7 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-flush_packets", "1",
     "-max_muxing_queue_size", "1024"
-  ];
+  );
 
   // Add metadata comment if provided. This embeds "PrismCast - <channel>" in the output for identification.
   if(comment) {
