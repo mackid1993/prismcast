@@ -194,7 +194,8 @@ export interface FFmpegProcess {
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with stdin, stdout, and kill function.
  */
-export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
+export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number, onError: (error: Error) => void, streamId?: string,
+  comment?: string): FFmpegProcess {
 
   // Use the cached FFmpeg path from resolveFFmpegPath(). This should always be set because isFFmpegAvailable() is called during startup, which populates the cache.
   // If somehow not set, fall back to "ffmpeg" and let spawn handle the error.
