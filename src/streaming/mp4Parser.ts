@@ -633,6 +633,127 @@ function extractTrunTotalDuration(data: Buffer, offset: number, size: number, de
   return totalDuration;
 }
 
+/**
+ * Rewrites per-sample durations in a trun box to a constant value, converting variable frame rate to constant frame rate at the container level. This modifies the
+ * buffer in place. Only affects trun boxes that have per-sample durations (flags bit 0x100). When per-sample durations are absent (using tfhd default), the trun
+ * already has constant duration and no rewriting is needed.
+ *
+ * @param data - The buffer containing the trun box. Modified in place.
+ * @param offset - The byte offset of the trun box within the buffer.
+ * @param size - The total size of the trun box.
+ * @param constantDuration - The constant duration to write for each sample, in timescale units (e.g., timescale / fps).
+ */
+function normalizeTrunDurations(data: Buffer, offset: number, size: number, constantDuration: number): void {
+
+  if(size < 16) {
+
+    return;
+  }
+
+  const trunFlags = data.readUInt32BE(offset + 8) & 0x00FFFFFF;
+  const sampleCount = data.readUInt32BE(offset + 12);
+
+  if((sampleCount === 0) || !(trunFlags & 0x100)) {
+
+    return;
+  }
+
+  // Compute the byte size of each per-sample entry.
+  let entrySize = 4;
+
+  if(trunFlags & 0x200) {
+
+    entrySize += 4;
+  }
+
+  if(trunFlags & 0x400) {
+
+    entrySize += 4;
+  }
+
+  if(trunFlags & 0x800) {
+
+    entrySize += 4;
+  }
+
+  // Walk past the optional header fields to reach the sample entries.
+  let pos = offset + 16;
+
+  if(trunFlags & 0x001) {
+
+    pos += 4;
+  }
+
+  if(trunFlags & 0x004) {
+
+    pos += 4;
+  }
+
+  // Overwrite each sample's duration with the constant value.
+  const endPos = offset + size;
+
+  for(let i = 0; i < sampleCount; i++) {
+
+    if((pos + 4) > endPos) {
+
+      break;
+    }
+
+    data.writeUInt32BE(constantDuration, pos);
+    pos += entrySize;
+  }
+}
+
+/**
+ * Normalizes frame durations in a moof box to enforce constant frame rate. Walks all traf boxes and rewrites per-sample durations in each video trun to a constant
+ * value derived from the track's timescale and target frame rate. Audio tracks are left unchanged since audio sample durations are already constant (1024 samples per
+ * AAC frame). The buffer is modified in place.
+ *
+ * @param moofData - The complete moof box buffer including its 8-byte header. Modified in place.
+ * @param trackTimescales - Map from track_ID to timescale, parsed from the moov box.
+ * @param targetFrameRate - The target video frame rate (e.g., 60). Used to compute constant duration: timescale / fps.
+ * @param audioTimescale - The audio track's timescale. Tracks with this timescale are skipped (audio doesn't need normalization).
+ */
+export function normalizeMoofFrameDurations(moofData: Buffer, trackTimescales: Map<number, number>, targetFrameRate: number, audioTimescale: number): void {
+
+  iterateChildBoxes(moofData, (type, data, offset, size) => {
+
+    if(type !== "traf") {
+
+      return;
+    }
+
+    const trafData = data.subarray(offset, offset + size);
+    let tfhdInfo: Nullable<TfhdInfo> = null;
+
+    iterateChildBoxes(trafData, (childType, childData, childOffset, childSize) => {
+
+      if(childType === "tfhd") {
+
+        tfhdInfo = parseTfhd(childData, childOffset, childSize);
+      } else if(childType === "trun") {
+
+        if(!tfhdInfo) {
+
+          return;
+        }
+
+        const timescale = trackTimescales.get(tfhdInfo.trackId);
+
+        if(!timescale || (timescale === audioTimescale)) {
+
+          return;
+        }
+
+        // Compute the constant duration for this video track: timescale / fps. For example, 90000 / 60 = 1500 ticks per frame.
+        const constantDuration = Math.round(timescale / targetFrameRate);
+
+        normalizeTrunDurations(childData, childOffset, childSize, constantDuration);
+      }
+    });
+  });
+}
+
 // Offset-Based Timestamp Rewriting.
 
 /**

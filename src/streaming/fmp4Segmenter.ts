@@ -2,7 +2,7 @@
  *
  * fmp4Segmenter.ts: fMP4 HLS segmentation for PrismCast.
  */
-import { createMP4BoxParser, detectMoofKeyframe, offsetMoofTimestamps, parseMoovTimescales } from "./mp4Parser.js";
+import { createMP4BoxParser, detectMoofKeyframe, normalizeMoofFrameDurations, offsetMoofTimestamps, parseMoovTimescales } from "./mp4Parser.js";
 import { getSegmentCount, storeInitSegment, storeSegment, updatePlaylist } from "./hlsSegments.js";
 import { CONFIG } from "../config/index.js";
 import { LOG } from "../utils/index.js";
@@ -256,6 +256,10 @@ interface SegmenterState {
   // timescale units) to seconds for EXTINF: seconds = duration / timescale.
   trackTimescales: Map<number, number>;
 
+  // The audio track's timescale, detected from the moov box. Common values are 48000 (48kHz) and 44100 (44.1kHz). Used by frame duration normalization to skip audio
+  // tracks (audio AAC frames have constant 1024-sample duration and don't need normalization). Zero if not detected.
+  audioTimescale: number;
+
   // Per-track timestamp counters, keyed by track_ID. Each value is the next expected baseMediaDecodeTime (originalTfdt + offset + duration), used for tab replacement
   // handoff via getTrackTimestamps(). Audio and video tracks have separate counters because they may use different timescales (e.g., 90000 for video, 48000 for audio).
   trackTimestamps: Map<number, bigint>;
@@ -410,6 +414,7 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
     trackOffsets: new Map(),
     trackOffsetsInitialized: new Set(),
     trackTimescales: new Map(),
+    audioTimescale: 0,
     trackTimestamps: initialTrackTimestamps ? new Map(initialTrackTimestamps) : new Map<number, bigint>()
   };
 
@@ -703,6 +708,13 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
 
               LOG.debug("streaming:segmenter", "No track timescales found in moov. EXTINF will use wall-clock fallback.");
             }
+
+            // Detect the audio timescale for frame duration normalization. Audio timescales match the sample rate (48000, 44100, etc.) and are always less than
+            // video timescales (90000 or framerate-based). The minimum timescale across tracks is reliably the audio track.
+            if(state.trackTimescales.size >= 2) {
+
+              state.audioTimescale = Math.min(...state.trackTimescales.values());
+            }
           } catch {
 
             LOG.debug("streaming:segmenter", "Failed to parse moov timescales. EXTINF will use wall-clock fallback.");
@@ -831,6 +843,14 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
         if(needsRewrite) {
 
           offsetMoofTimestamps(box.data, state.trackOffsets);
+        }
+
+        // Normalize video frame durations to enforce constant frame rate. Chrome's MediaRecorder outputs variable frame rate H264, where individual frame durations
+        // jitter around the target (e.g., 14-20ms instead of constant 16.67ms at 60fps). This rewrites trun sample durations in place to a constant value derived from
+        // the track timescale and configured frame rate, converting VFR to CFR at the container level without touching the video bitstream.
+        if((state.audioTimescale > 0) && (state.trackTimescales.size >= 2)) {
+
+          normalizeMoofFrameDurations(box.data, state.trackTimescales, CONFIG.streaming.frameRate, state.audioTimescale);
         }
 
         // Track "next expected" for future tab replacement handoff and accumulate durations for EXTINF.
