@@ -173,8 +173,10 @@ export interface FFmpegProcess {
  *
  * FFmpeg arguments:
  * - `-hide_banner -loglevel warning`: Reduce noise, only show warnings/errors
+ * - `-fflags +genpts`: Regenerate presentation timestamps to smooth Chrome's variable frame rate output
  * - `-probesize 16384`: Limit input probing to 16KB (Chrome's WebM header fits well under this) to minimize startup delay
  * - `-i pipe:0`: Read input from stdin
+ * - `-r <frameRate>`: Enforce constant frame rate output to prevent VFR-induced playback stutter
  * - `-c:v copy`: Copy video stream without re-encoding (H264 passthrough)
  * - `-c:a aac -b:a <bitrate>`: Transcode audio to AAC at specified bitrate
  * - `-f mp4`: Output MP4 container format
@@ -182,12 +184,13 @@ export interface FFmpegProcess {
  * - `-flush_packets 1`: Flush output immediately after each packet to minimize latency
  * - `pipe:1`: Write output to stdout
  * @param audioBitrate - Audio bitrate in bits per second (e.g., 256000 for 256 kbps).
+ * @param frameRate - Target video frame rate (e.g., 30, 60). Used to enforce constant frame timing on Chrome's variable frame rate output.
  * @param onError - Callback invoked when FFmpeg exits unexpectedly or encounters an error.
  * @param streamId - Stream identifier for logging.
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with stdin, stdout, and kill function.
  */
-export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
+export function spawnFFmpeg(audioBitrate: number, frameRate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
   // Use the cached FFmpeg path from resolveFFmpegPath(). This should always be set because isFFmpegAvailable() is called during startup, which populates the cache.
   // If somehow not set, fall back to "ffmpeg" and let spawn handle the error.
@@ -199,9 +202,11 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "warning",
+    "-fflags", "+genpts",
     "-probesize", "16384",
     "-i", "pipe:0",
     "-c:v", "copy",
+    "-r", String(frameRate),
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
