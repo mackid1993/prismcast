@@ -2,7 +2,7 @@
  *
  * fmp4Segmenter.ts: fMP4 HLS segmentation for PrismCast.
  */
-import { createMP4BoxParser, detectMoofKeyframe, normalizeMoofFrameDurations, offsetMoofTimestamps, parseMoovTimescales } from "./mp4Parser.js";
+import { createMP4BoxParser, detectMoofKeyframe, offsetMoofTimestamps, parseMoovTimescales } from "./mp4Parser.js";
 import { getSegmentCount, storeInitSegment, storeSegment, updatePlaylist } from "./hlsSegments.js";
 import { CONFIG } from "../config/index.js";
 import { LOG } from "../utils/index.js";
@@ -252,15 +252,6 @@ interface SegmenterState {
   // until it arrives.
   trackOffsetsInitialized: Set<number>;
 
-  // The audio track's timescale, detected from the moov box. Common values are 48000 (48kHz) and 44100 (44.1kHz). Used by frame duration normalization to skip audio
-  // tracks (audio AAC frames have constant 1024-sample duration and don't need normalization). Zero if not detected.
-  audioTimescale: number;
-
-  // Per-video-track running position in timescale units, accumulated from normalized (constant) frame durations. Used to rewrite tfdt values so they match the
-  // normalized durations exactly. Without this, Chrome's original tfdt values have gaps when frames are dropped, causing player stutter even after duration
-  // normalization. Audio tracks are not tracked here — they use Chrome's original timestamps via the offset mechanism.
-  normalizedVideoPositions: Map<number, bigint>;
-
   // Per-track timescale values parsed from the moov box. Keyed by track_ID. Populated once when the moov box is received. Converts accumulated trun durations (in
   // timescale units) to seconds for EXTINF: seconds = duration / timescale.
   trackTimescales: Map<number, number>;
@@ -390,7 +381,6 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
   // Initialize state.
   const state: SegmenterState = {
 
-    audioTimescale: 0,
     discontinuityIndices: new Set(),
     firstSegmentEmitted: false,
     fragmentBuffer: [],
@@ -406,7 +396,6 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
     minKeyframeIntervalMs: Infinity,
     nonKeyframeCount: 0,
     normalizedReferencePositionSec: null,
-    normalizedVideoPositions: initialTrackTimestamps ? new Map<number, bigint>(initialTrackTimestamps) : new Map<number, bigint>(),
     pendingDiscontinuity: pendingDiscontinuity ?? false,
     segmentDurations: new Map(),
     segmentFirstMoofChecked: false,
@@ -715,12 +704,6 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
               LOG.debug("streaming:segmenter", "No track timescales found in moov. EXTINF will use wall-clock fallback.");
             }
 
-            // Detect the audio timescale for frame duration normalization. Audio timescales match the sample rate (48000, 44100, etc.) and are always less than
-            // video timescales (90000 or framerate-based). The minimum timescale across tracks is reliably the audio track.
-            if(state.trackTimescales.size >= 2) {
-
-              state.audioTimescale = Math.min(...state.trackTimescales.values());
-            }
           } catch {
 
             LOG.debug("streaming:segmenter", "Failed to parse moov timescales. EXTINF will use wall-clock fallback.");
@@ -849,15 +832,6 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
         if(needsRewrite) {
 
           offsetMoofTimestamps(box.data, state.trackOffsets);
-        }
-
-        // Normalize video frame durations to enforce constant frame rate and rewrite video tfdt values to eliminate timestamp gaps from dropped frames. Chrome's
-        // MediaRecorder outputs variable frame rate H264, where individual frame durations jitter around the target (e.g., 14-20ms instead of constant 16.67ms at 60fps).
-        // Additionally, when Chrome drops frames, the next moof's tfdt jumps ahead, creating gaps the player sees as stutter. This rewrites both trun sample durations
-        // and tfdt values in place, using a running position counter to ensure gap-free, constant-rate video timestamps.
-        if((state.audioTimescale > 0) && (state.trackTimescales.size >= 2)) {
-
-          normalizeMoofFrameDurations(box.data, state.trackTimescales, CONFIG.streaming.frameRate, state.audioTimescale, state.normalizedVideoPositions);
         }
 
         // Track "next expected" for future tab replacement handoff and accumulate durations for EXTINF.
