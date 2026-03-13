@@ -210,6 +210,8 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
     "-c:v", "libx264",
     "-preset", "ultrafast",
     "-b:v", String(videoBitrate),
+    "-maxrate", String(videoBitrate),
+    "-bufsize", String(videoBitrate * 2),
     "-r", String(frameRate),
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
