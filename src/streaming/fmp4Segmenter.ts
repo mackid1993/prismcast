@@ -415,9 +415,9 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
     sessionStats: priorSessionStats ? { ...priorSessionStats, tabReplacementCount: priorSessionStats.tabReplacementCount + 1 } :
       { malformedMoofCount: 0, syncSpreadCount: 0, syncSpreadMaxMs: 0, syncSpreadMinMs: Infinity, syncSpreadSumMs: 0, tabReplacementCount: 0 },
     stopped: false,
-    totalKeyframeIntervalMs: 0,
     audioTimescale: 0,
     normalizedVideoPositions: initialTrackTimestamps ? new Map<number, bigint>(initialTrackTimestamps) : new Map<number, bigint>(),
+    totalKeyframeIntervalMs: 0,
     trackOffsets: new Map(),
     trackOffsetsInitialized: new Set(),
     trackTimescales: new Map(),
