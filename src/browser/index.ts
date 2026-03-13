@@ -502,12 +502,6 @@ export function buildLaunchOptions(): LaunchOptions {
      * --disable-blink-features=AutomationControlled: Hides the navigator.webdriver property that indicates automated control. Some sites detect and block
      *   automated browsers; this flag helps avoid that detection.
      *
-     * --disable-frame-rate-limit: Removes Chrome's internal frame rate cap, allowing the compositor to produce frames as fast as possible. Without this,
-     *   Chrome may limit frame output to the display's refresh rate, causing MediaRecorder to receive fewer frames than the target capture rate.
-     *
-     * --disable-gpu-vsync: Disables vertical sync in the GPU compositor. Vsync ties frame production to the display refresh cycle, which on a virtual
-     *   display (Xvfb) can introduce irregular frame pacing that causes stutter in the captured stream.
-     *
      * --disable-notifications: Prevents notification permission prompts and popups that could interfere with video capture or require user interaction.
      *
      * --run-all-compositor-stages-before-draw: Forces the compositor to complete all rendering stages before producing each frame. Without this, Chrome may
@@ -531,8 +525,6 @@ export function buildLaunchOptions(): LaunchOptions {
       "--disable-background-timer-throttling",
       "--disable-backgrounding-occluded-windows",
       "--disable-blink-features=AutomationControlled",
-      "--disable-frame-rate-limit",
-      "--disable-gpu-vsync",
       "--disable-notifications",
       "--run-all-compositor-stages-before-draw",
       "--hide-crash-restore-bubble",
