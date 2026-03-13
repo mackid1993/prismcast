@@ -2,10 +2,9 @@
 #
 name: "Continuous Integration"
 
-# Run the build on all push, pull request, and release creation events.
+# Run the build on pull request, release, and manual dispatch events.
 on:
   pull_request:
-  push:
   release:
     types: [ published ]
   workflow_dispatch:
