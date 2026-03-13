@@ -705,16 +705,19 @@ function normalizeTrunDurations(data: Buffer, offset: number, size: number, cons
 }
 
 /**
- * Normalizes frame durations in a moof box to enforce constant frame rate. Walks all traf boxes and rewrites per-sample durations in each video trun to a constant
- * value derived from the track's timescale and target frame rate. Audio tracks are left unchanged since audio sample durations are already constant (1024 samples per
- * AAC frame). The buffer is modified in place.
+ * Normalizes frame durations in a moof box to enforce constant frame rate and rewrites tfdt (baseMediaDecodeTime) values for video tracks to match the caller's
+ * running position counter. This eliminates both VFR jitter (irregular frame durations) and timestamp gaps (from dropped frames) in a single pass. Audio tracks are
+ * left unchanged since audio sample durations are already constant (1024 samples per AAC frame). The buffer is modified in place.
  *
  * @param moofData - The complete moof box buffer including its 8-byte header. Modified in place.
  * @param trackTimescales - Map from track_ID to timescale, parsed from the moov box.
  * @param targetFrameRate - The target video frame rate (e.g., 60). Used to compute constant duration: timescale / fps.
  * @param audioTimescale - The audio track's timescale. Tracks with this timescale are skipped (audio doesn't need normalization).
+ * @param videoPositions - Map from video track_ID to the current running position in timescale units. Updated in place: each video track's position is advanced by
+ *   sampleCount * constantDuration after processing.
  */
-export function normalizeMoofFrameDurations(moofData: Buffer, trackTimescales: Map<number, number>, targetFrameRate: number, audioTimescale: number): void {
+export function normalizeMoofFrameDurations(moofData: Buffer, trackTimescales: Map<number, number>, targetFrameRate: number, audioTimescale: number,
+  videoPositions: Map<number, bigint>): void {
 
   iterateChildBoxes(moofData, (type, data, offset, size) => {
 
@@ -725,24 +728,57 @@ export function normalizeMoofFrameDurations(moofData: Buffer, trackTimescales: M
 
     const trafData = data.subarray(offset, offset + size);
     let tfhdInfo: Nullable<TfhdInfo> = null;
+    let isVideoTrack = false;
+    let trackSampleCount = 0;
 
     iterateChildBoxes(trafData, (childType, childData, childOffset, childSize) => {
 
       if(childType === "tfhd") {
 
         tfhdInfo = parseTfhd(childData, childOffset, childSize);
-      } else if(childType === "trun") {
 
-        if(!tfhdInfo) {
+        if(tfhdInfo) {
+
+          const timescale = trackTimescales.get(tfhdInfo.trackId);
+
+          isVideoTrack = (timescale !== undefined) && (timescale !== audioTimescale);
+        }
+      } else if((childType === "tfdt") && isVideoTrack && tfhdInfo) {
+
+        // Rewrite the video track's tfdt to our running position counter, eliminating gaps from dropped frames. The tfdt layout matches the offset rewriting code:
+        // version 0 = 32-bit at offset 12, version 1 = 64-bit at offset 12.
+        if(childSize < 16) {
 
           return;
         }
 
+        const position = videoPositions.get(tfhdInfo.trackId) ?? 0n;
+        const version = childData.readUInt8(childOffset + 8);
+
+        if(version === 0) {
+
+          childData.writeUInt32BE(Number(position & 0xFFFFFFFFn), childOffset + 12);
+        } else {
+
+          const high = Number((position >> 32n) & 0xFFFFFFFFn);
+          const low = Number(position & 0xFFFFFFFFn);
+
+          childData.writeUInt32BE(high, childOffset + 12);
+          childData.writeUInt32BE(low, childOffset + 16);
+        }
+      } else if((childType === "trun") && isVideoTrack && tfhdInfo) {
+
         const timescale = trackTimescales.get(tfhdInfo.trackId);
 
-        if(!timescale || (timescale === audioTimescale)) {
+        if(!timescale) {
 
           return;
+        }
+
+        // Count samples in this trun for position advancement.
+        if(childSize >= 16) {
+
+          trackSampleCount += childData.readUInt32BE(childOffset + 12);
         }
 
         // Compute the constant duration for this video track: timescale / fps. For example, 90000 / 60 = 1500 ticks per frame.
@@ -751,6 +787,20 @@ export function normalizeMoofFrameDurations(moofData: Buffer, trackTimescales: M
         normalizeTrunDurations(childData, childOffset, childSize, constantDuration);
       }
     });
+
+    // Advance the running position for this video track by the total normalized duration.
+    if(isVideoTrack && tfhdInfo && (trackSampleCount > 0)) {
+
+      const timescale = trackTimescales.get((tfhdInfo as TfhdInfo).trackId);
+
+      if(timescale) {
+
+        const constantDuration = BigInt(Math.round(timescale / targetFrameRate));
+        const currentPos = videoPositions.get((tfhdInfo as TfhdInfo).trackId) ?? 0n;
+
+        videoPositions.set((tfhdInfo as TfhdInfo).trackId, currentPos + (constantDuration * BigInt(trackSampleCount)));
+      }
+    }
   });
 }
 

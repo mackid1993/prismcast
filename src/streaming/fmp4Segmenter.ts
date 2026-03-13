@@ -260,6 +260,11 @@ interface SegmenterState {
   // tracks (audio AAC frames have constant 1024-sample duration and don't need normalization). Zero if not detected.
   audioTimescale: number;
 
+  // Per-video-track running position in timescale units, accumulated from normalized (constant) frame durations. Used to rewrite tfdt values so they match the
+  // normalized durations exactly. Without this, Chrome's original tfdt values have gaps when frames are dropped, causing player stutter even after duration
+  // normalization. Audio tracks are not tracked here — they use Chrome's original timestamps via the offset mechanism.
+  normalizedVideoPositions: Map<number, bigint>;
+
   // Per-track timestamp counters, keyed by track_ID. Each value is the next expected baseMediaDecodeTime (originalTfdt + offset + duration), used for tab replacement
   // handoff via getTrackTimestamps(). Audio and video tracks have separate counters because they may use different timescales (e.g., 90000 for video, 48000 for audio).
   trackTimestamps: Map<number, bigint>;
@@ -415,6 +420,7 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
     trackOffsetsInitialized: new Set(),
     trackTimescales: new Map(),
     audioTimescale: 0,
+    normalizedVideoPositions: new Map(),
     trackTimestamps: initialTrackTimestamps ? new Map(initialTrackTimestamps) : new Map<number, bigint>()
   };
 
@@ -845,12 +851,13 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
           offsetMoofTimestamps(box.data, state.trackOffsets);
         }
 
-        // Normalize video frame durations to enforce constant frame rate. Chrome's MediaRecorder outputs variable frame rate H264, where individual frame durations
-        // jitter around the target (e.g., 14-20ms instead of constant 16.67ms at 60fps). This rewrites trun sample durations in place to a constant value derived from
-        // the track timescale and configured frame rate, converting VFR to CFR at the container level without touching the video bitstream.
+        // Normalize video frame durations to enforce constant frame rate and rewrite video tfdt values to eliminate timestamp gaps from dropped frames. Chrome's
+        // MediaRecorder outputs variable frame rate H264, where individual frame durations jitter around the target (e.g., 14-20ms instead of constant 16.67ms at 60fps).
+        // Additionally, when Chrome drops frames, the next moof's tfdt jumps ahead, creating gaps the player sees as stutter. This rewrites both trun sample durations
+        // and tfdt values in place, using a running position counter to ensure gap-free, constant-rate video timestamps.
         if((state.audioTimescale > 0) && (state.trackTimescales.size >= 2)) {
 
-          normalizeMoofFrameDurations(box.data, state.trackTimescales, CONFIG.streaming.frameRate, state.audioTimescale);
+          normalizeMoofFrameDurations(box.data, state.trackTimescales, CONFIG.streaming.frameRate, state.audioTimescale, state.normalizedVideoPositions);
         }
 
         // Track "next expected" for future tab replacement handoff and accumulate durations for EXTINF.
