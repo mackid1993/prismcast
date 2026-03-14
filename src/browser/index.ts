@@ -899,14 +899,56 @@ async function launchBrowser(): Promise<Browser> {
             return;
           }
 
+          // Test which codec configurations are supported before configuring.
+          var codecs = ["avc1.640033", "avc1.640028", "avc1.42e01e", "avc1.420028"];
+          var selectedCodec = null;
+          for (var ci = 0; ci < codecs.length; ci++) {
+            try {
+              var testResult = await VideoEncoder.isConfigSupported({
+                codec: codecs[ci], width: width, height: height,
+                framerate: frameRate, bitrate: bitrate,
+                hardwareAcceleration: "prefer-hardware"
+              });
+              sendDiag("codec-test:" + codecs[ci] + "=" + (testResult.supported ? "yes" : "no"));
+              if (testResult.supported && !selectedCodec) selectedCodec = codecs[ci];
+            } catch(err) {
+              sendDiag("codec-test:" + codecs[ci] + "=error:" + err.message);
+            }
+          }
+
+          // Also test software fallback.
+          if (!selectedCodec) {
+            for (var si = 0; si < codecs.length; si++) {
+              try {
+                var swResult = await VideoEncoder.isConfigSupported({
+                  codec: codecs[si], width: width, height: height,
+                  framerate: frameRate, bitrate: bitrate,
+                  hardwareAcceleration: "no-preference"
+                });
+                sendDiag("codec-test-sw:" + codecs[si] + "=" + (swResult.supported ? "yes" : "no"));
+                if (swResult.supported && !selectedCodec) selectedCodec = codecs[si];
+              } catch(err) {
+                sendDiag("codec-test-sw:" + codecs[si] + "=error:" + err.message);
+              }
+            }
+          }
+
+          if (!selectedCodec) {
+            sendDiag("no-supported-codec-found");
+            return;
+          }
+
+          var hwMode = selectedCodec ? "prefer-hardware" : "no-preference";
+          sendDiag("selected-codec:" + selectedCodec + ",hw=" + hwMode);
+
           try {
             encoder.configure({
-              codec: "avc1.420028",
+              codec: selectedCodec,
               width: width,
               height: height,
               framerate: frameRate,
               bitrate: bitrate,
-              hardwareAcceleration: "prefer-hardware",
+              hardwareAcceleration: hwMode,
               avc: { format: "annexb" }
             });
             sendDiag("encoder-configured:state=" + encoder.state);
