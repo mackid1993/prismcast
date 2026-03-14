@@ -399,16 +399,16 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
 
   LOG.info("WebRTC FFmpeg: using %s (%s).", ffmpegPath, useVaapi ? "h264_vaapi hardware" : "libx264 software");
 
-  // Crop to viewport if frame is larger than viewport, then encode.
-  const needsCrop = (width !== cropWidth) || (height !== cropHeight);
-  const cropFilter = needsCrop ? "crop=" + String(cropWidth) + ":" + String(cropHeight) + ":0:0," : "";
+  // Scale to the user's configured output resolution if the capture is larger.
+  const needsScale = (width !== cropWidth) || (height !== cropHeight);
+  const scaleFilter = needsScale ? "scale=" + String(cropWidth) + ":" + String(cropHeight) + "," : "";
 
   // Video encoding: VA-API hardware or libx264 software.
   if(useVaapi) {
 
     ffmpegArgs.push(
       "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", cropFilter + "format=nv12,hwupload",
+      "-vf", scaleFilter + "format=nv12,hwupload",
       "-c:v", "h264_vaapi",
       "-bf", "0",
       "-r", String(frameRate),
@@ -418,10 +418,10 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     );
   } else {
 
-    const swCrop = needsCrop ? ["-vf", cropFilter.slice(0, -1)] : [];
+    const swScale = needsScale ? ["-vf", scaleFilter.slice(0, -1)] : [];
 
     ffmpegArgs.push(
-      ...swCrop,
+      ...swScale,
       "-c:v", "libx264",
       "-preset", "ultrafast",
       "-bf", "0",

@@ -564,7 +564,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
         const viewport = getEffectiveViewport(CONFIG);
 
-        LOG.info("WebRTC: frame %dx%d → crop to viewport %dx%d.", dims.width, dims.height, viewport.width, viewport.height);
+        LOG.info("WebRTC: frame %dx%d → scale to %dx%d.", dims.width, dims.height, viewport.width, viewport.height);
         const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
           CONFIG.streaming.frameRate, dims.width, dims.height, viewport.width, viewport.height,
           ffmpegError, streamId, comment);
