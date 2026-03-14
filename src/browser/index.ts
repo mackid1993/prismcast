@@ -856,21 +856,26 @@ async function launchBrowser(): Promise<Browser> {
           var entry = activeCaptures.values().next().value;
           if (!entry || !entry.pc || !entry.stream) return null;
 
-          // Set werift's offer first, THEN add the track. This ensures Chrome associates the video track with werift's
-          // transceiver instead of creating a separate one.
           await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
 
-          // Now add the video track — it gets associated with the existing transceiver from the offer.
+          // Find the transceiver created by the offer and put our video track on it.
           var videoTrack = entry.stream.getVideoTracks()[0];
-          entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
-
-          // Force H264 codec on the transceiver.
           var transceivers = entry.pc.getTransceivers();
-          if (transceivers.length > 0) {
-            var h264Codecs = RTCRtpReceiver.getCapabilities("video").codecs.filter(function(c) {
-              return c.mimeType === "video/H264";
-            });
-            if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
+          var videoTransceiver = null;
+          for (var i = 0; i < transceivers.length; i++) {
+            if (transceivers[i].receiver.track && transceivers[i].receiver.track.kind === "video") {
+              videoTransceiver = transceivers[i];
+              break;
+            }
+          }
+
+          if (videoTransceiver) {
+            await videoTransceiver.sender.replaceTrack(videoTrack);
+            videoTransceiver.direction = "sendonly";
+            entry.videoSender = videoTransceiver.sender;
+          } else {
+            // Fallback: addTrack if no matching transceiver found.
+            entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
           }
 
           var answer = await entry.pc.createAnswer();
