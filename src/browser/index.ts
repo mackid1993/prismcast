@@ -6,7 +6,7 @@ import type { Browser, LaunchOptions, Page } from "puppeteer-core";
 import { LOG, evaluateWithAbort, formatError, startTimer } from "../utils/index.js";
 import { getAllStreams, getStreamCount } from "../streaming/registry.js";
 import { getChromeDataDir, getDataDir, getExtensionDir } from "../config/paths.js";
-import { getEffectivePreset, getPresetViewport } from "../config/presets.js";
+import { getEffectivePreset, getEffectiveViewport, getPresetViewport } from "../config/presets.js";
 import { getExtensionPage, getStream, launch } from "puppeteer-stream";
 import { resizeAndMinimizeWindow, unminimizeWindow } from "./cdp.js";
 import { setBrowserChrome, setMaxSupportedViewport } from "./display.js";
@@ -828,6 +828,133 @@ async function launchBrowser(): Promise<Browser> {
       const extensionPage = await getExtensionPage(currentBrowser);
 
       await extensionPage.waitForFunction("typeof START_RECORDING === 'function'", { timeout: CONFIG.browser.initTimeout });
+
+      // Monkey-patch START_RECORDING to use WebCodecs VideoEncoder instead of MediaRecorder for video encoding. Chrome's MediaRecorder on Linux uses a software H264
+      // encoder that drops frames when bitrate dips (low-motion scenes). WebCodecs VideoEncoder encodes every frame, prefers hardware acceleration (VA-API/Quick Sync),
+      // and gives us direct control over frame timing. Audio stays on MediaRecorder (audio-only) since AudioEncoder AAC support is inconsistent on Linux.
+      //
+      // Data format over WebSocket: each message is prefixed with a type byte.
+      //   0x01 + raw H264 Annex B data = video chunk from VideoEncoder
+      //   0x02 + WebM/Opus data = audio chunk from MediaRecorder
+      //
+      // The patch is evaluated as a plain JavaScript string because the code runs in the Chrome extension context where browser APIs (chrome.tabCapture,
+      // VideoEncoder, MediaStreamTrackProcessor) exist but have no TypeScript definitions in the Node.js compilation context.
+      // eslint-disable-next-line no-restricted-syntax
+      const patchScript = `(function(frameRate, bitrate, width, height) {
+        var origStopRecording = globalThis.STOP_RECORDING;
+        var activeEncoders = new Map();
+
+        globalThis.START_RECORDING = async function(opts) {
+          var index = opts.index;
+          var port = opts.port;
+          var videoConstraints = opts.videoConstraints;
+
+          var captureStream = await new Promise(function(resolve, reject) {
+            var constraints = {
+              audio: !!opts.audio,
+              video: videoConstraints ? { mandatory: videoConstraints.mandatory } : true
+            };
+            chrome.tabCapture.capture(constraints, function(stream) {
+              if (!stream || chrome.runtime.lastError) {
+                reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || "tabCapture failed"));
+                return;
+              }
+              resolve(stream);
+            });
+          });
+
+          var ws = new WebSocket("ws://localhost:" + port + "/?index=" + index);
+          await new Promise(function(resolve, reject) {
+            ws.onopen = resolve;
+            ws.onerror = reject;
+          });
+          ws.binaryType = "arraybuffer";
+
+          var videoTrack = captureStream.getVideoTracks()[0];
+          var processor = new MediaStreamTrackProcessor({ track: videoTrack });
+          var reader = processor.readable.getReader();
+
+          var encoder = new VideoEncoder({
+            error: function(e) { console.error("VideoEncoder error:", e); },
+            output: function(chunk) {
+              var data = new Uint8Array(chunk.byteLength);
+              chunk.copyTo(data);
+              var msg = new Uint8Array(1 + data.length);
+              msg[0] = 0x01;
+              msg.set(data, 1);
+              if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
+            }
+          });
+
+          encoder.configure({
+            codec: "avc1.42001f",
+            width: width,
+            height: height,
+            framerate: frameRate,
+            bitrate: bitrate,
+            hardwareAcceleration: "prefer-hardware",
+            avc: { format: "annexb" }
+          });
+
+          var audioStream = new MediaStream(captureStream.getAudioTracks());
+          var recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm;codecs=opus" });
+          recorder.ondataavailable = async function(e) {
+            if (!e.data.size) return;
+            var buffer = await e.data.arrayBuffer();
+            var msg = new Uint8Array(1 + buffer.byteLength);
+            msg[0] = 0x02;
+            msg.set(new Uint8Array(buffer), 1);
+            if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
+          };
+          recorder.start(20);
+
+          (async function pumpFrames() {
+            try {
+              while (true) {
+                var result = await reader.read();
+                if (result.done || !result.value) break;
+                if (encoder.state === "configured") encoder.encode(result.value);
+                result.value.close();
+              }
+            } catch(e) { /* stream closed, expected during cleanup */ }
+          })();
+
+          activeEncoders.set(index, { encoder: encoder, recorder: recorder, stream: captureStream, ws: ws });
+        };
+
+        globalThis.STOP_RECORDING = function(index) {
+          if (index !== undefined) {
+            var entry = activeEncoders.get(index);
+            if (entry) {
+              try { entry.encoder.close(); } catch(e) {}
+              try { entry.recorder.stop(); } catch(e) {}
+              try { entry.ws.close(); } catch(e) {}
+              entry.stream.getTracks().forEach(function(t) { t.stop(); });
+              activeEncoders.delete(index);
+            }
+          } else {
+            activeEncoders.forEach(function(entry, key) {
+              try { entry.encoder.close(); } catch(e) {}
+              try { entry.recorder.stop(); } catch(e) {}
+              try { entry.ws.close(); } catch(e) {}
+              entry.stream.getTracks().forEach(function(t) { t.stop(); });
+              activeEncoders.delete(key);
+            });
+          }
+          origStopRecording(index);
+        };
+      })(FRAME_RATE, BITRATE, WIDTH, HEIGHT)`;
+
+      const viewport = getEffectiveViewport(CONFIG);
+      const filledScript = patchScript
+        .replace("FRAME_RATE", String(CONFIG.streaming.frameRate))
+        .replace("BITRATE", String(CONFIG.streaming.videoBitsPerSecond))
+        .replace("WIDTH", String(viewport.width))
+        .replace("HEIGHT", String(viewport.height));
+
+      await extensionPage.evaluate(filledScript);
+
+      LOG.info("WebCodecs VideoEncoder monkey-patch installed (hardware acceleration preferred).");
     } catch {
 
       // If the extension page isn't found or START_RECORDING doesn't appear within the timeout, log a warning and proceed. The per-stream
