@@ -385,12 +385,15 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: raw I420 video frames from native WebRTC RTCVideoSink. No input -r flag — let FFmpeg timestamp frames as they arrive.
+    // Input 0: raw I420 video frames from native WebRTC RTCVideoSink. Wall-clock timestamps ensure video PTS advances at real time,
+    // matching audio PTS from the PCM input. Without this, FFmpeg defaults to 25fps PTS and video races ahead of audio, stalling the muxer.
+    "-use_wallclock_as_timestamps", "1",
     "-f", "rawvideo",
     "-pix_fmt", "yuv420p",
     "-video_size", String(width) + "x" + String(height),
     "-i", "pipe:3",
-    // Input 1: raw s16le PCM audio from RTCAudioSink (48kHz stereo).
+    // Input 1: raw s16le PCM audio from RTCAudioSink (48kHz stereo). Wall-clock timestamps match the video input.
+    "-use_wallclock_as_timestamps", "1",
     "-f", "s16le",
     "-ar", "48000",
     "-ac", "2",
