@@ -95,9 +95,10 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
     videoOutput.write(output.frame.data);
   });
 
+  // Try both track subscription methods — transceiver.onTrack and pc.ontrack.
   transceiver.onTrack.subscribe((track): void => {
 
-    LOG.info("%sWebRTC: video track received, subscribing to RTP.", logPrefix);
+    LOG.info("%sWebRTC: video track received via transceiver.onTrack.", logPrefix);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     track.onReceiveRtp.subscribe((rtp: any) => {
@@ -111,6 +112,28 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
       depacketizer.input({ rtp, time: Date.now() });
     });
   });
+
+  // Also subscribe via pc.ontrack as a backup.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pc.ontrack = (event: any): void => {
+
+    LOG.info("%sWebRTC: video track received via pc.ontrack, kind=%s.", logPrefix, event?.track?.kind ?? "unknown");
+
+    if(event?.track?.kind === "video" && event.track.onReceiveRtp) {
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      event.track.onReceiveRtp.subscribe((rtp: any) => {
+
+        if(closed) {
+
+          return;
+        }
+
+        rtpCount++;
+        depacketizer.input({ rtp, time: Date.now() });
+      });
+    }
+  };
 
   // Periodically request keyframes.
   const pliInterval = setInterval((): void => {
