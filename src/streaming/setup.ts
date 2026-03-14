@@ -523,13 +523,13 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
       captureLogInterval.unref();
 
-      (rawCaptureStream as Readable).on("data", (chunk: Buffer) => {
+      rawCaptureStream.on("data", (chunk: Buffer) => {
 
         captureBytes += chunk.length;
         captureChunks++;
       });
 
-      (rawCaptureStream as Readable).on("close", () => {
+      rawCaptureStream.on("close", () => {
 
         clearInterval(captureLogInterval);
       });
