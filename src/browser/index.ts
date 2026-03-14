@@ -828,22 +828,6 @@ async function launchBrowser(): Promise<Browser> {
       const extensionPage = await getExtensionPage(currentBrowser);
 
       await extensionPage.waitForFunction("typeof START_RECORDING === 'function'", { timeout: CONFIG.browser.initTimeout });
-
-      // Monkey-patch MediaRecorder in the extension context to force constant bitrate mode. Chrome's MediaRecorder drops frames when bitrate dips on low-motion
-      // scenes to stay within budget. Setting videoBitrateMode to "constant" forces CBR encoding — the encoder must produce data for every frame interval.
-      await extensionPage.evaluate(() => {
-
-        const OrigMediaRecorder = window.MediaRecorder;
-
-        // @ts-expect-error — Replacing the global MediaRecorder constructor with a wrapper.
-        window.MediaRecorder = function(stream: MediaStream, options?: MediaRecorderOptions): MediaRecorder {
-
-          return new OrigMediaRecorder(stream, { ...options, videoBitrateMode: "constant" } as MediaRecorderOptions);
-        };
-
-        window.MediaRecorder.prototype = OrigMediaRecorder.prototype;
-        window.MediaRecorder.isTypeSupported = (type: string): boolean => OrigMediaRecorder.isTypeSupported(type);
-      });
     } catch {
 
       // If the extension page isn't found or START_RECORDING doesn't appear within the timeout, log a warning and proceed. The per-stream
