@@ -571,7 +571,9 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number,
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: H264 Annex B from Chrome's Encoded Transform API. Pre-encoded by Chrome's hardware encoder — no decode or re-encode needed.
+    // Input 0: H264 from Chrome's Encoded Transform API. Wall-clock timestamps ensure media time matches real time —
+    // without this, FFmpeg assigns arbitrary PTS to H264 NAL units, producing segments claiming 40-60s of media in 2s of wall time.
+    "-use_wallclock_as_timestamps", "1",
     "-f", "h264",
     "-i", "pipe:3",
     // Input 1: raw s16le PCM audio from RTCAudioSink.
