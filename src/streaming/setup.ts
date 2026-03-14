@@ -590,7 +590,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
         const { spawnH264PassthroughFFmpeg } = await import("../utils/ffmpeg.js");
         const ffmpeg = spawnH264PassthroughFFmpeg(CONFIG.streaming.audioBitsPerSecond,
-          ffmpegError, streamId, comment);
+          CONFIG.streaming.frameRate, ffmpegError, streamId, comment);
 
         ffmpegProcess = {
 
@@ -603,14 +603,74 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         };
 
         // Parse the rawCaptureStream for H264 video (0x03) and WebM/Opus audio (0x02).
-        // puppeteer-stream writes raw WebSocket messages to the stream — prefix byte identifies the data type.
+        // Audio arrives before video (MediaRecorder starts before WebRTC connects), so buffer early
+        // audio until the first H264 frame arrives. The first WebM chunk contains the EBML header —
+        // must be preserved or FFmpeg can't parse subsequent audio clusters.
+        const ANNEX_B_START_CODE = Buffer.from([ 0x00, 0x00, 0x00, 0x01 ]);
+        let h264FrameCount = 0;
+        let audioBuffered: Buffer[] = [];
+
         rawCaptureStream.on("data", (data: Buffer) => {
 
-          if(data.length > 2 && data[0] === 0x03 && ffmpeg.videoPipe) {
+          if((data.length > 2) && (data[0] === 0x03) && ffmpeg.videoPipe) {
 
-            // H264 encoded frame from Encoded Transform. Byte 1 = keyframe flag, rest is H264 data.
-            ffmpeg.videoPipe.write(data.subarray(2));
-          } else if(data.length > 1 && data[0] === 0x02 && ffmpeg.audioPipe) {
+            const h264Data = data.subarray(2);
+
+            // Log first frame's bytes to diagnose format (Annex B vs AVCC).
+            if(h264FrameCount === 0) {
+
+              const isKeyframe = data[1] === 1;
+              const firstBytes = Array.from(h264Data.subarray(0, Math.min(16, h264Data.length)))
+                .map((b) => b.toString(16).padStart(2, "0")).join(" ");
+
+              LOG.info("H264 passthrough: first frame %d bytes, keyframe=%s, first bytes: %s",
+                h264Data.length, String(isKeyframe), firstBytes);
+
+              // Flush buffered audio now that video has started — write the WebM header (first chunk)
+              // followed by the latest cluster, dropping intermediate chunks to avoid timestamp offset.
+              if((audioBuffered.length > 0) && ffmpeg.audioPipe) {
+
+                // First chunk has the WebM EBML header; last chunk is the most recent audio.
+                ffmpeg.audioPipe.write(audioBuffered[0]);
+
+                if(audioBuffered.length > 1) {
+
+                  LOG.info("H264 passthrough: dropped %d early audio chunks to sync with video.", audioBuffered.length - 1);
+                }
+
+                audioBuffered = [];
+              }
+            }
+
+            h264FrameCount++;
+
+            // Ensure Annex B format: if data doesn't start with start code, prepend one.
+            // Chrome's Encoded Transform API may provide raw NAL units without start codes.
+            const hasStartCode = (h264Data.length >= 4) &&
+              (((h264Data[0] === 0x00) && (h264Data[1] === 0x00) && (h264Data[2] === 0x00) && (h264Data[3] === 0x01)) ||
+              ((h264Data[0] === 0x00) && (h264Data[1] === 0x00) && (h264Data[2] === 0x01)));
+
+            if(hasStartCode) {
+
+              ffmpeg.videoPipe.write(h264Data);
+            } else {
+
+              if(h264FrameCount === 1) {
+
+                LOG.info("H264 passthrough: injecting Annex B start codes (data is not Annex B).");
+              }
+
+              ffmpeg.videoPipe.write(Buffer.concat([ ANNEX_B_START_CODE, h264Data ]));
+            }
+          } else if((data.length > 1) && (data[0] === 0x02) && ffmpeg.audioPipe) {
+
+            if(h264FrameCount === 0) {
+
+              // Buffer audio until video starts — need the WebM header from the first chunk.
+              audioBuffered.push(Buffer.from(data.subarray(1)));
+
+              return;
+            }
 
             // WebM/Opus audio chunk from MediaRecorder. Strip prefix, pipe to FFmpeg.
             ffmpeg.audioPipe.write(data.subarray(1));

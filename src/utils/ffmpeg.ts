@@ -560,7 +560,7 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
  * @param comment - Optional metadata comment.
  * @returns FFmpeg process with videoPipe (fd 3), audioPipe (fd 4), stdout for fMP4 output.
  */
-export function spawnH264PassthroughFFmpeg(audioBitrate: number,
+export function spawnH264PassthroughFFmpeg(audioBitrate: number, frameRate: number,
   onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
   const ffmpegPath = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
@@ -570,9 +570,10 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number,
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: H264 from Chrome's Encoded Transform API. Wall-clock timestamps required because raw H264 has
-    // no container timestamps — without this, FFmpeg assigns wrong PTS (40-60s media per 2s wall time).
-    "-use_wallclock_as_timestamps", "1",
+    // Input 0: H264 from Chrome's Encoded Transform API. Use explicit framerate to assign deterministic PTS —
+    // wall-clock timestamps don't work because H264 frames arrive in bursts through WebSocket/pipe I/O,
+    // causing compressed or expanded timestamps (e.g. 13s media in 3s wall time).
+    "-framerate", String(frameRate),
     "-f", "h264",
     "-i", "pipe:3",
     // Input 1: WebM/Opus audio from Chrome's MediaRecorder (0x02 WebSocket data). Full quality 48kHz stereo —
