@@ -358,8 +358,8 @@ export function spawnWebCodecsFFmpeg(audioBitrate: number, frameRate: number, on
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Raw H264 Annex B has no timestamps — set the input frame rate so FFmpeg generates them.
-    "-framerate", String(frameRate),
+    // Raw H264 Annex B input with assumed frame rate for timestamp generation.
+    "-r", String(frameRate),
     "-f", "h264",
     "-i", "pipe:3",
     "-f", "webm",
@@ -367,6 +367,7 @@ export function spawnWebCodecsFFmpeg(audioBitrate: number, frameRate: number, on
     "-map", "0:v",
     "-map", "1:a",
     "-c:v", "copy",
+    "-r", String(frameRate),
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
