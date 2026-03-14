@@ -522,8 +522,6 @@ export function buildLaunchOptions(): LaunchOptions {
       "--disable-background-timer-throttling",
       "--disable-backgrounding-occluded-windows",
       "--disable-blink-features=AutomationControlled",
-      "--disable-frame-rate-limit",
-      "--disable-gpu-vsync",
       "--disable-notifications",
       "--hide-crash-restore-bubble",
       "--hide-scrollbars",

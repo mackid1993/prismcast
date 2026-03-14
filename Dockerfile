@@ -1,7 +1,5 @@
 # PrismCast Docker image. Published to ghcr.io/hjdhjd/prismcast on each release.
 # docker pull ghcr.io/hjdhjd/prismcast:latest
-FROM lscr.io/linuxserver/xvfb:debiantrixie AS xvfb
-
 FROM debian:trixie-slim
 
 # Prevent interactive prompts during package installation.
@@ -14,8 +12,11 @@ RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     ca-certificates \
-    # Xvfb and X11 utilities (standard Xvfb installed here for deps; overridden below by custom build).
-    xvfb \
+    # Xorg with dummy video driver for a proper 60Hz virtual display. Chrome's compositor syncs to the display's refresh rate — Xvfb reports 0Hz which throttles
+    # Chrome to ~53fps. Xorg + dummy driver provides real modeline-based refresh rates, giving Chrome a proper 60Hz vsync signal just like a real monitor.
+    xserver-xorg-core \
+    xserver-xorg-video-dummy \
+    x11-xserver-utils \
     x11vnc \
     x11-xkb-utils \
     xfonts-100dpi \
@@ -122,9 +123,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # Create the VNC password directory. Users can mount a password file here for authenticated VNC access.
 RUN mkdir -p /root/.vnc
 
-# Overlay the LinuxServer custom Xvfb (with DRI3/DRM -vfbdevice support) over the standard Debian binary.
-COPY --from=xvfb / /
-
 # Set environment variables for the virtual display, Chrome binary, and Puppeteer.
 ENV DISPLAY=:99
 ENV CHROME_BIN=/usr/local/bin/chrome-no-sandbox
@@ -132,8 +130,6 @@ ENV PRISMCAST_CONTAINER=1
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 ENV LIBVA_DRIVER_NAME=iHD
-ENV DISABLE_ZINK=false
-ENV DISABLE_DRI3=false
 
 # Data persistence. Mount a volume at the data directory to preserve configuration, Chrome profile, and logs across container recreations:
 #   docker run -v prismcast-data:/root/.prismcast ...
@@ -150,5 +146,5 @@ EXPOSE 5589 5900 6080 5004
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s \
     CMD wget -q --spider http://localhost:5589/health || exit 1
 
-# Use the entrypoint script to start Xvfb, x11vnc, noVNC, and PrismCast.
+# Use the entrypoint script to start Xorg, x11vnc, noVNC, and PrismCast.
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

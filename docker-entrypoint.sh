@@ -56,73 +56,104 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# Remove stale X11 lock files from previous container runs. Without this, Xvfb refuses to start after an unclean shutdown.
+# Remove stale X11 lock files from previous container runs.
 rm -f /tmp/.X${DISPLAY_NUM}-lock /tmp/.X11-unix/X${DISPLAY_NUM}
 
-# Build the DRI3 device flag for Xvfb, mirroring the Selkies svc-xorg logic.
-# The custom LinuxServer Xvfb binary (overlaid in the Docker build) supports -vfbdevice,
-# which connects the virtual framebuffer to the GPU's DRM device and enables DRI3
-# hardware-accelerated rendering. Without this, Chrome sees software GL only and
-# disables VAAPI. DISABLE_DRI3 must be exactly "false" (string) for DRI3 to stay active.
-VFBCOMMAND=""
-if [ -e /dev/dri/renderD128 ] && ! which nvidia-smi > /dev/null 2>&1; then
-  VFBCOMMAND="-vfbdevice /dev/dri/renderD128"
-fi
-if [ -n "${DRINODE}" ]; then
-  VFBCOMMAND="-vfbdevice ${DRINODE}"
-fi
-if [ "${DISABLE_DRI3}" != "false" ]; then
-  VFBCOMMAND=""
-fi
-
-# Ensure the DRI render node is accessible.
+# Ensure the DRI render node is accessible for VA-API hardware video decoding.
 if [ -e /dev/dri/renderD128 ]; then
   chmod g+rw /dev/dri/renderD128 2>/dev/null || true
 fi
 
-# Start Xvfb with GLX extensions and optional DRI3 GPU device backing.
-echo "Starting Xvfb..."
-Xvfb ${DISPLAY} \
-  -screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x${SCREEN_DEPTH} \
-  -dpi 96 \
-  +extension COMPOSITE \
-  +extension DAMAGE \
-  +extension GLX \
-  +extension RANDR \
-  +extension RENDER \
-  +extension MIT-SHM \
-  +extension XFIXES \
-  +extension XTEST \
-  +iglx \
-  +render \
+# Generate xorg.conf with the correct resolution and refresh rate. Chrome's compositor syncs to the display's reported refresh rate — a proper modeline ensures Chrome
+# produces frames at the target rate, just like a real monitor. This is the key difference between Linux (virtual display) and macOS (real display).
+TARGET_FPS=${FRAME_RATE:-60}
+MODE_NAME="${SCREEN_WIDTH}x${SCREEN_HEIGHT}_${TARGET_FPS}.00"
+
+# Compute an approximate CVT modeline for the target resolution and refresh rate. The pixel clock and blanking values don't need to be exact for a virtual display —
+# the dummy driver just needs a valid modeline with the correct refresh rate so Chrome's compositor sees the right Hz value.
+H=${SCREEN_WIDTH}
+V=${SCREEN_HEIGHT}
+HTOTAL=$((H + H / 5))
+VTOTAL=$((V + V / 20))
+PCLK=$(awk "BEGIN {printf \"%.2f\", ${HTOTAL} * ${VTOTAL} * ${TARGET_FPS} / 1000000}")
+HFP=$((H + H / 40))
+HSP=$((H + H / 10))
+VFP=$((V + 3))
+VSP=$((V + 6))
+
+XORG_CONF="/etc/X11/xorg.conf"
+cat > "${XORG_CONF}" <<XORGEOF
+Section "ServerFlags"
+    Option "DontVTSwitch"       "true"
+    Option "AllowMouseOpenFail" "true"
+    Option "PciForceNone"       "true"
+    Option "AutoEnableDevices"  "false"
+    Option "AutoAddDevices"     "false"
+EndSection
+
+Section "InputDevice"
+    Identifier "dummy_mouse"
+    Driver     "void"
+EndSection
+
+Section "InputDevice"
+    Identifier "dummy_keyboard"
+    Driver     "void"
+EndSection
+
+Section "Device"
+    Identifier "dummy_videocard"
+    Driver     "dummy"
+    Option     "ConstantDPI" "true"
+    VideoRam   256000
+EndSection
+
+Section "Monitor"
+    Identifier "dummy_monitor"
+    HorizSync   1.0 - 200.0
+    VertRefresh 1.0 - 200.0
+    Modeline "${MODE_NAME}" ${PCLK} ${H} ${HFP} ${HSP} ${HTOTAL} ${V} ${VFP} ${VSP} ${VTOTAL} -hsync +vsync
+EndSection
+
+Section "Screen"
+    Identifier "dummy_screen"
+    Device     "dummy_videocard"
+    Monitor    "dummy_monitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth  24
+        Modes  "${MODE_NAME}"
+        Virtual ${SCREEN_WIDTH} ${SCREEN_HEIGHT}
+    EndSubSection
+EndSection
+
+Section "ServerLayout"
+    Identifier "dummy_layout"
+    Screen     "dummy_screen"
+    InputDevice "dummy_mouse"    "CorePointer"
+    InputDevice "dummy_keyboard" "CoreKeyboard"
+EndSection
+XORGEOF
+
+echo "Starting Xorg with dummy driver (${SCREEN_WIDTH}x${SCREEN_HEIGHT}@${TARGET_FPS}Hz)..."
+Xorg ${DISPLAY} \
+  -noreset \
   -nolisten tcp \
   -ac \
-  -noreset \
-  -shmem \
-  ${VFBCOMMAND} &
-XVFB_PID=$!
+  -config "${XORG_CONF}" \
+  +extension GLX \
+  +extension RANDR \
+  +extension RENDER &
+XORG_PID=$!
 sleep 2
 
-# Verify that Xvfb started successfully.
-if ! kill -0 $XVFB_PID 2>/dev/null; then
-  echo "ERROR: Xvfb failed to start."
+# Verify that Xorg started successfully.
+if ! kill -0 $XORG_PID 2>/dev/null; then
+  echo "ERROR: Xorg failed to start. Check container logs."
+  cat /var/log/Xorg.0.log 2>/dev/null | tail -20
   exit 1
 fi
-echo "Xvfb started successfully (DRI3: ${VFBCOMMAND:-disabled})."
-
-# Configure the virtual display refresh rate to match the capture frame rate. Xvfb doesn't natively enforce a refresh rate, but Chrome's compositor syncs to the
-# display's reported rate. Without this, Chrome may throttle frame production to ~40fps, causing capture stutter on Linux that doesn't occur on macOS with a real display.
-TARGET_FPS=${FRAME_RATE:-60}
-MODELINE=$(cvt ${SCREEN_WIDTH} ${SCREEN_HEIGHT} ${TARGET_FPS} 2>/dev/null | grep "Modeline" | sed 's/Modeline //')
-if [ -n "$MODELINE" ]; then
-  MODE_NAME=$(echo "$MODELINE" | awk '{print $1}' | tr -d '"')
-  xrandr --newmode $MODELINE 2>/dev/null || true
-  xrandr --addmode screen $MODE_NAME 2>/dev/null || true
-  xrandr --output screen --mode $MODE_NAME 2>/dev/null || true
-  echo "Display configured: ${SCREEN_WIDTH}x${SCREEN_HEIGHT}@${TARGET_FPS}Hz."
-else
-  echo "Warning: Could not set ${TARGET_FPS}Hz refresh rate (cvt not available)."
-fi
+echo "Xorg started successfully (${SCREEN_WIDTH}x${SCREEN_HEIGHT}@${TARGET_FPS}Hz)."
 
 # Start x11vnc (VNC server for the virtual display).
 echo "Starting x11vnc..."
