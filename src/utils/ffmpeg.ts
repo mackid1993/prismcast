@@ -385,11 +385,10 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: raw I420 video frames from native WebRTC RTCVideoSink.
+    // Input 0: raw I420 video frames from native WebRTC RTCVideoSink. No input -r flag — let FFmpeg timestamp frames as they arrive.
     "-f", "rawvideo",
     "-pix_fmt", "yuv420p",
     "-video_size", String(width) + "x" + String(height),
-    "-r", String(frameRate),
     "-i", "pipe:3",
     // Input 1: audio-only WebM/Opus from MediaRecorder.
     "-f", "webm",
