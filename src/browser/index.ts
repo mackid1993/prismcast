@@ -901,7 +901,7 @@ async function launchBrowser(): Promise<Browser> {
 
           try {
             encoder.configure({
-              codec: "avc1.42001f",
+              codec: "avc1.420028",
               width: width,
               height: height,
               framerate: frameRate,
