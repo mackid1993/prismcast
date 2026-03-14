@@ -348,8 +348,8 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with videoPipe (fd 3), audioPipe (fd 4), stdout, and kill function.
  */
-export function spawnWebCodecsFFmpeg(audioBitrate: number, onError: (error: Error) => void, streamId?: string,
-  comment?: string): FFmpegProcess {
+export function spawnWebCodecsFFmpeg(audioBitrate: number, frameRate: number, onError: (error: Error) => void,
+  streamId?: string, comment?: string): FFmpegProcess {
 
   const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
   const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
@@ -358,6 +358,8 @@ export function spawnWebCodecsFFmpeg(audioBitrate: number, onError: (error: Erro
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
+    // Raw H264 Annex B has no timestamps — set the input frame rate so FFmpeg generates them.
+    "-framerate", String(frameRate),
     "-f", "h264",
     "-i", "pipe:3",
     "-f", "webm",

@@ -475,7 +475,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
       // Use WebCodecs dual-input mode: the capture stream carries type-prefixed messages (0x01=video H264, 0x02=audio WebM/Opus). FFmpeg accepts video on fd 3 and
       // audio on fd 4, copies video through and transcodes audio from Opus to AAC.
-      const ffmpeg = spawnWebCodecsFFmpeg(CONFIG.streaming.audioBitsPerSecond, (error) => {
+      const ffmpeg = spawnWebCodecsFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
 
         LOG.error("FFmpeg process error: %s.", formatError(error));
 
