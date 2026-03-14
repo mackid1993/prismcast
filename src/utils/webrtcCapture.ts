@@ -197,7 +197,35 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
     setTimeout(resolve, 10000);
   });
 
-  const offerSdp = pc.localDescription?.sdp ?? "";
+  // Reorder SDP to prefer H264 over VP8/VP9. Chrome picks the first codec in the m-line, so without this
+  // it defaults to VP8. We find the H264 payload type(s) and move them to the front of the video m-line.
+  let offerSdp = pc.localDescription?.sdp ?? "";
+  const videoMLine = /^(m=video \d+ [A-Z/]+ )([\d ]+)/m.exec(offerSdp);
+
+  if(videoMLine) {
+
+    // Find all H264 payload types from a=rtpmap lines.
+    const h264PTs: string[] = [];
+    const rtpmapMatches = offerSdp.matchAll(/a=rtpmap:(\d+) H264\//gi);
+
+    for(const m of rtpmapMatches) {
+
+      h264PTs.push(m[1]);
+    }
+
+    if(h264PTs.length > 0) {
+
+      // Reorder: H264 payload types first, then everything else.
+      const allPTs = videoMLine[2].trim().split(/\s+/);
+      const reordered = [ ...h264PTs, ...allPTs.filter((pt) => !h264PTs.includes(pt)) ];
+
+      offerSdp = offerSdp.replace(videoMLine[0], videoMLine[1] + reordered.join(" "));
+      LOG.info("%sWebRTC: SDP reordered to prefer H264 (PTs: %s).", logPrefix, h264PTs.join(", "));
+    } else {
+
+      LOG.warn("%sWebRTC: no H264 codec found in SDP offer — Chrome will use VP8.", logPrefix);
+    }
+  }
 
   LOG.info("%sWebRTC: offer created with %d candidates.", logPrefix,
     (offerSdp.match(/a=candidate/g) ?? []).length);
