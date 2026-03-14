@@ -473,7 +473,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
-      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, (error) => {
+      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
 
         LOG.error("FFmpeg process error: %s.", formatError(error));
 

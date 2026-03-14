@@ -97,10 +97,18 @@ RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firm
     i965-va-driver \
     intel-media-va-driver \
     vainfo \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PrismCast globally from npm.
-RUN npm install -g prismcast
+# Install PrismCast — from local source when BUILD_FROM_SOURCE is set, otherwise from npm.
+ARG BUILD_FROM_SOURCE=false
+COPY . /tmp/prismcast-src
+RUN if [ "$BUILD_FROM_SOURCE" = "true" ]; then \
+      cd /tmp/prismcast-src && npm install && npm run build && npm pack \
+      && npm install -g prismcast-*.tgz && rm -rf /tmp/prismcast-src ; \
+    else \
+      npm install -g prismcast && rm -rf /tmp/prismcast-src ; \
+    fi
 
 # Create a Chrome wrapper script that passes --no-sandbox for container environments and enables Intel VA-API hardware video encoding.
 RUN printf '#!/bin/bash\nexec /usr/bin/google-chrome-stable --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --enable-features=VaapiVideoDecoder,VaapiVideoEncoder,AcceleratedVideoEncoder,VaapiIgnoreDriverChecks --ignore-gpu-blocklist "$@"\n' > /usr/local/bin/chrome-no-sandbox \

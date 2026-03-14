@@ -1,7 +1,7 @@
-# Dependencies
+# Dependencies (reinstalled during build)
 node_modules/
 
-# Build output (we install from npm)
+# Build output (rebuilt during build)
 dist/
 
 # Git
@@ -17,16 +17,6 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
-
-# Documentation
-*.md
-LICENSE
-
-# Development files
-tsconfig.json
-eslint.config.js
-.eslintrc*
-.prettierrc*
 
 # Test files
 __tests__/

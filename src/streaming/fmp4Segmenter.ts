@@ -517,7 +517,10 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
       }
     }
 
-    const actualDuration = Math.max(0.1, (mediaDuration > 0) ? mediaDuration : ((Date.now() - state.segmentStartTime) / 1000));
+    // Use wall-clock duration for EXTINF. Chrome's H264 encoder on Linux produces VFR output with inconsistent trun sample durations — media timeline can diverge
+    // wildly from real time (e.g., 16s media in 10s wall). Since the segmenter cuts on wall-clock time, EXTINF must match wall-clock for the HLS client's buffer
+    // estimation to work correctly. Wrong EXTINF durations cause the player to miscalculate its buffer, producing stutter and jitter.
+    const actualDuration = Math.max(0.1, (Date.now() - state.segmentStartTime) / 1000);
 
     state.segmentDurations.set(state.segmentIndex, actualDuration);
 
