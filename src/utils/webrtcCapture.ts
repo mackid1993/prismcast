@@ -158,27 +158,16 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
   // Create the offer and wait for ICE gathering to complete. The offer must include werift's ICE candidates so Chrome knows where to send RTP.
   await pc.setLocalDescription(await pc.createOffer());
 
-  // Wait for ICE gathering to complete.
+  // Wait for ICE gathering. Log the state to debug why candidates aren't appearing.
+  LOG.info("%sWebRTC: ICE gathering state after setLocalDescription: %s", logPrefix, pc.iceGatheringState);
+
+  // Force a 2 second wait regardless of state — werift might report "complete" before actually gathering.
   await new Promise<void>((resolve) => {
 
-    if(pc.iceGatheringState === "complete") {
-
-      resolve();
-
-      return;
-    }
-
-    pc.iceGatheringStateChange.subscribe((state) => {
-
-      if(state === "complete") {
-
-        resolve();
-      }
-    });
-
-    // Timeout after 5 seconds.
-    setTimeout(resolve, 5000);
+    setTimeout(resolve, 2000);
   });
+
+  LOG.info("%sWebRTC: ICE gathering state after 2s wait: %s", logPrefix, pc.iceGatheringState);
 
   const offerSdp = pc.localDescription?.sdp ?? "";
 
