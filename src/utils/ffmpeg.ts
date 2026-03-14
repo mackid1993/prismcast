@@ -40,6 +40,7 @@ const ffmpegPath = ffmpegForHomebridge as unknown as string | undefined;
 // Cached FFmpeg path after resolution. Null means not yet resolved, undefined means not found.
 let cachedFFmpegPath: Nullable<string> | undefined = null;
 
+
 /**
  * Checks if FFmpeg exists at a specific path by attempting to run it.
  * @param pathToCheck - Full path to the FFmpeg executable.
@@ -176,7 +177,7 @@ export interface FFmpegProcess {
  * - `-hide_banner -loglevel warning`: Reduce noise, only show warnings/errors
  * - `-probesize 16384`: Limit input probing to 16KB (Chrome's WebM header fits well under this) to minimize startup delay
  * - `-i pipe:0`: Read input from stdin
- * - `-c:v libx264 -preset veryfast`: Re-encode video to enforce constant frame rate with good compression efficiency
+ * - `-c:v libx264 -preset veryfast`: Re-encode video to enforce constant frame rate from Chrome's VFR MediaRecorder output
  * - `-b:v <bitrate> -maxrate <bitrate> -bufsize <2x bitrate>`: Target and cap video bitrate to the user's configured value
  * - `-r <frameRate>`: Output at the user's configured constant frame rate (e.g., 30, 60)
  * - `-c:a aac -b:a <bitrate>`: Transcode audio to AAC at specified bitrate
@@ -204,63 +205,17 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
   // Use Apple's AudioToolbox AAC encoder on macOS for better quality and performance. Fall back to FFmpeg's built-in AAC encoder on other platforms.
   const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
 
-  // Select the video encoder based on platform. On Linux with VA-API (iGPU), use hardware-accelerated h264_vaapi for near-zero CPU encoding. On macOS, use
-  // VideoToolbox for hardware encoding. Fall back to libx264 veryfast on other platforms.
-  const useVaapi = (process.platform === "linux") && existsSync("/dev/dri/renderD128");
-  const useVideoToolbox = process.platform === "darwin";
-
   const ffmpegArgs = [
     "-hide_banner",
-    "-loglevel", "warning"
-  ];
-
-  // VA-API requires hardware device initialization before the input.
-  if(useVaapi) {
-
-    ffmpegArgs.push("-vaapi_device", "/dev/dri/renderD128");
-  }
-
-  ffmpegArgs.push(
+    "-loglevel", "warning",
     "-probesize", "16384",
-    "-i", "pipe:0"
-  );
-
-  // Video encoder selection with constant frame rate enforcement.
-  if(useVaapi) {
-
-    // VA-API hardware encoding: decode to system memory, upload to VA-API surface, encode. The vpp_vaapi filter handles the pixel format conversion.
-    ffmpegArgs.push(
-      "-vf", "format=nv12,hwupload",
-      "-c:v", "h264_vaapi",
-      "-b:v", String(videoBitrate),
-      "-maxrate", String(videoBitrate),
-      "-bufsize", String(videoBitrate * 2),
-      "-r", String(frameRate)
-    );
-  } else if(useVideoToolbox) {
-
-    // macOS VideoToolbox hardware encoding.
-    ffmpegArgs.push(
-      "-c:v", "h264_videotoolbox",
-      "-b:v", String(videoBitrate),
-      "-maxrate", String(videoBitrate),
-      "-bufsize", String(videoBitrate * 2),
-      "-r", String(frameRate)
-    );
-  } else {
-
-    // Software encoding fallback.
-    ffmpegArgs.push(
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-b:v", String(videoBitrate),
-      "-maxrate", String(videoBitrate),
-      "-bufsize", String(videoBitrate * 2),
-      "-r", String(frameRate)
-    );
-  }
-
-  ffmpegArgs.push(
+    "-i", "pipe:0",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-b:v", String(videoBitrate),
+    "-maxrate", String(videoBitrate),
+    "-bufsize", String(videoBitrate * 2),
+    "-r", String(frameRate),
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
@@ -268,7 +223,7 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-flush_packets", "1",
     "-max_muxing_queue_size", "1024"
-  );
+  ];
 
   // Add metadata comment if provided. This embeds "PrismCast - <channel>" in the output for identification.
   if(comment) {
