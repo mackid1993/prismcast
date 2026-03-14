@@ -373,8 +373,8 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
  * @returns FFmpeg process with videoPipe (fd 3), audioPipe (fd 4), stdout for fMP4 output.
  */
 export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number,
-  width: number, height: number, onError: (error: Error) => void,
-  streamId?: string, comment?: string): FFmpegProcess {
+  width: number, height: number, cropWidth: number, cropHeight: number,
+  onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
   // Use system FFmpeg for VA-API hardware encoding when available.
   const useVaapi = (process.platform === "linux") && existsSync("/dev/dri/renderD128") && existsSync("/usr/bin/ffmpeg");
@@ -398,12 +398,16 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     "-map", "1:a"
   ];
 
+  // Crop to viewport if frame is larger than viewport, then encode.
+  const needsCrop = (width !== cropWidth) || (height !== cropHeight);
+  const cropFilter = needsCrop ? "crop=" + String(cropWidth) + ":" + String(cropHeight) + ":0:0," : "";
+
   // Video encoding: VA-API hardware or libx264 software.
   if(useVaapi) {
 
     ffmpegArgs.push(
       "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", "format=nv12,hwupload",
+      "-vf", cropFilter + "format=nv12,hwupload",
       "-c:v", "h264_vaapi",
       "-bf", "0",
       "-b:v", String(videoBitrate),
@@ -412,9 +416,12 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     );
   } else {
 
+    const swCrop = needsCrop ? [ "-vf", cropFilter.slice(0, -1) ] : [];
+
     ffmpegArgs.push(
+      ...swCrop,
       "-c:v", "libx264",
-      "-preset", "veryfast",
+      "-preset", "ultrafast",
       "-bf", "0",
       "-b:v", String(videoBitrate),
       "-maxrate", String(videoBitrate),

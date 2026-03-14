@@ -562,9 +562,12 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         LOG.info("WebRTC: waiting for first frame dimensions...");
         const dims = await webrtcPeer.firstFrameDimensions;
 
-        LOG.info("WebRTC: spawning FFmpeg for %dx%d.", dims.width, dims.height);
+        const viewport = getEffectiveViewport(CONFIG);
+
+        LOG.info("WebRTC: spawning FFmpeg for %dx%d → crop to %dx%d.", dims.width, dims.height, viewport.width, viewport.height);
         const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
-          CONFIG.streaming.frameRate, dims.width, dims.height, ffmpegError, streamId, comment);
+          CONFIG.streaming.frameRate, dims.width, dims.height, viewport.width, viewport.height,
+          ffmpegError, streamId, comment);
 
         ffmpegProcess = {
 
