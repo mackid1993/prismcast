@@ -372,24 +372,57 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
  * @param comment - Optional metadata comment.
  * @returns FFmpeg process with videoPipe (fd 3), audioPipe (fd 4), stdout for fMP4 output.
  */
-export function spawnWebRTCFFmpeg(audioBitrate: number, frameRate: number, onError: (error: Error) => void,
+export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number,
+  width: number, height: number, onError: (error: Error) => void,
   streamId?: string, comment?: string): FFmpegProcess {
 
-  const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
+  // Use system FFmpeg for VA-API hardware encoding when available.
+  const useVaapi = (process.platform === "linux") && existsSync("/dev/dri/renderD128") && existsSync("/usr/bin/ffmpeg");
+  const ffmpegPath = useVaapi ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
   const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
 
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
+    // Input 0: raw I420 video frames from native WebRTC RTCVideoSink.
+    "-f", "rawvideo",
+    "-pix_fmt", "yuv420p",
+    "-video_size", String(width) + "x" + String(height),
     "-r", String(frameRate),
-    "-f", "h264",
     "-i", "pipe:3",
+    // Input 1: audio-only WebM/Opus from MediaRecorder.
     "-f", "webm",
     "-i", "pipe:4",
     "-map", "0:v",
-    "-map", "1:a",
-    "-c:v", "copy",
+    "-map", "1:a"
+  ];
+
+  // Video encoding: VA-API hardware or libx264 software.
+  if(useVaapi) {
+
+    ffmpegArgs.push(
+      "-vaapi_device", "/dev/dri/renderD128",
+      "-vf", "format=nv12,hwupload",
+      "-c:v", "h264_vaapi",
+      "-bf", "0",
+      "-b:v", String(videoBitrate),
+      "-maxrate", String(videoBitrate),
+      "-bufsize", String(videoBitrate * 2)
+    );
+  } else {
+
+    ffmpegArgs.push(
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-bf", "0",
+      "-b:v", String(videoBitrate),
+      "-maxrate", String(videoBitrate),
+      "-bufsize", String(videoBitrate * 2)
+    );
+  }
+
+  ffmpegArgs.push(
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
@@ -397,7 +430,7 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, frameRate: number, onErr
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-flush_packets", "1",
     "-max_muxing_queue_size", "1024"
-  ];
+  );
 
   if(comment) {
 

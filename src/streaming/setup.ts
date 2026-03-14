@@ -552,8 +552,9 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       if(useWebRTC && webrtcPeer) {
 
         // WebRTC mode: video from werift, audio from WebSocket.
-        const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.frameRate,
-          ffmpegError, streamId, comment);
+        const viewport = getEffectiveViewport(CONFIG);
+        const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
+          CONFIG.streaming.frameRate, viewport.width, viewport.height, ffmpegError, streamId, comment);
 
         ffmpegProcess = {
 
