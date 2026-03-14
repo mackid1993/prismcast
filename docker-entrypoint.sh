@@ -110,6 +110,20 @@ if ! kill -0 $XVFB_PID 2>/dev/null; then
 fi
 echo "Xvfb started successfully (DRI3: ${VFBCOMMAND:-disabled})."
 
+# Configure the virtual display to run at 60Hz. Xvfb doesn't natively enforce a refresh rate, but Chrome's compositor syncs to the display's reported rate. Without
+# this, Chrome may throttle frame production to a lower rate (~40fps), causing capture stutter on Linux that doesn't occur on macOS with a real display.
+REFRESH_RATE=${REFRESH_RATE:-60}
+MODELINE=$(cvt ${SCREEN_WIDTH} ${SCREEN_HEIGHT} ${REFRESH_RATE} 2>/dev/null | grep "Modeline" | sed 's/Modeline //')
+if [ -n "$MODELINE" ]; then
+  MODE_NAME=$(echo "$MODELINE" | awk '{print $1}' | tr -d '"')
+  xrandr --newmode $MODELINE 2>/dev/null || true
+  xrandr --addmode screen $MODE_NAME 2>/dev/null || true
+  xrandr --output screen --mode $MODE_NAME 2>/dev/null || true
+  echo "Display configured: ${SCREEN_WIDTH}x${SCREEN_HEIGHT}@${REFRESH_RATE}Hz."
+else
+  echo "Warning: Could not set ${REFRESH_RATE}Hz refresh rate (cvt not available)."
+fi
+
 # Start x11vnc (VNC server for the virtual display).
 echo "Starting x11vnc..."
 if [ -f /root/.vnc/passwd ]; then
