@@ -579,16 +579,19 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number, frameRate: numb
     "-f", "h264",
     "-i", "pipe:3",
     // Input 1: WebM/Opus audio from Chrome's MediaRecorder (0x02 WebSocket data). Full quality 48kHz stereo —
-    // bypasses RTCAudioSink which negotiates down to 16kHz mono via WebRTC. WebM container has its own timestamps.
+    // bypasses RTCAudioSink which negotiates down to 16kHz mono via WebRTC. Probesize needed so FFmpeg can
+    // parse the WebM header from small MediaRecorder chunks (20ms timeslice = ~29 byte chunks).
+    "-probesize", "16384",
     "-f", "webm",
     "-i", "pipe:4",
     "-map", "0:v",
     "-map", "1:a",
     // Video: copy through unchanged. Zero CPU.
     "-c:v", "copy",
-    // Audio: transcode Opus to AAC.
+    // Audio: transcode Opus to AAC. aresample=async handles A/V drift since audio starts before video.
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-flush_packets", "1",
