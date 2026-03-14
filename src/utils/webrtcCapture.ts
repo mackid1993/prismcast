@@ -64,7 +64,25 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
     isFinalPacketInSequence: H264RtpPayload.isDetectedFinalPacketInSequence
   });
 
-  // When a complete frame is depacketized, write it as Annex B.
+
+  // Handle incoming RTP on the transceiver's receiver.
+  let rtpCount = 0;
+  let frameBytes = 0;
+
+  const statsInterval = setInterval((): void => {
+
+    if(!closed) {
+
+      LOG.info("%sWebRTC stats: rtp=%d, videoOut=%d KB", logPrefix, rtpCount, Math.round(frameBytes / 1024));
+    }
+
+    rtpCount = 0;
+    frameBytes = 0;
+  }, 5000);
+
+  statsInterval.unref();
+
+  // Override the depacketizer pipe to also count bytes.
   depacketizer.pipe((output: { frame?: { data: Buffer; isKeyframe: boolean } }): void => {
 
     if(closed || !output.frame) {
@@ -72,14 +90,14 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
       return;
     }
 
+    frameBytes += output.frame.data.length;
     videoOutput.write(ANNEX_B_START_CODE);
     videoOutput.write(output.frame.data);
   });
 
-  // Handle incoming RTP on the transceiver's receiver.
   transceiver.onTrack.subscribe((track): void => {
 
-    LOG.info("%sWebRTC: video track received, RTP flowing.", logPrefix);
+    LOG.info("%sWebRTC: video track received, subscribing to RTP.", logPrefix);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     track.onReceiveRtp.subscribe((rtp: any) => {
@@ -89,6 +107,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
         return;
       }
 
+      rtpCount++;
       depacketizer.input({ rtp, time: Date.now() });
     });
   });
