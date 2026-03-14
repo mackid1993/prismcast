@@ -850,26 +850,19 @@ async function launchBrowser(): Promise<Browser> {
         var origStopRecording = globalThis.STOP_RECORDING;
         var activeCaptures = new Map();
 
-        // Signaling state — Node.js reads these via page.evaluate().
-        globalThis.WEBRTC_OFFER = null;
-        globalThis.WEBRTC_ICE_CANDIDATES = [];
-        globalThis.WEBRTC_READY = false;
-
-        // Node.js calls this to deliver the SDP answer.
-        globalThis.WEBRTC_SET_ANSWER = function(sdp) {
+        // Node.js calls this with werift's SDP offer. Chrome creates an answer and returns it.
+        // This is called from setup.ts AFTER the capture starts.
+        globalThis.WEBRTC_CONNECT = async function(offerSdp) {
           var entry = activeCaptures.values().next().value;
-          if (entry && entry.pc) {
-            entry.pc.setRemoteDescription({ type: "answer", sdp: sdp });
-          }
+          if (!entry || !entry.pc) return null;
+          await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
+          var answer = await entry.pc.createAnswer();
+          await entry.pc.setLocalDescription(answer);
+          return entry.pc.localDescription.sdp;
         };
 
-        // Node.js calls this to deliver an ICE candidate.
-        globalThis.WEBRTC_ADD_ICE_CANDIDATE = function(candidate) {
-          var entry = activeCaptures.values().next().value;
-          if (entry && entry.pc) {
-            entry.pc.addIceCandidate(JSON.parse(candidate));
-          }
-        };
+        // Signal that the monkey-patch is installed and ready.
+        globalThis.WEBRTC_PATCHED = true;
 
         globalThis.START_RECORDING = async function(opts) {
           var index = opts.index;
@@ -893,10 +886,10 @@ async function launchBrowser(): Promise<Browser> {
           });
           ws.binaryType = "arraybuffer";
 
-          // Create RTCPeerConnection for video — sends H264 RTP to Node.js werift peer.
+          // Create RTCPeerConnection for video — Chrome answers werift's offer, sends H264 RTP.
           var pc = new RTCPeerConnection();
 
-          // Add video track.
+          // Add video track from tabCapture.
           var videoTrack = captureStream.getVideoTracks()[0];
           var videoSender = pc.addTrack(videoTrack, captureStream);
 
@@ -908,6 +901,18 @@ async function launchBrowser(): Promise<Browser> {
             });
             if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
           }
+
+          // Force bitrate after connection establishes.
+          pc.onconnectionstatechange = function() {
+            if (pc.connectionState === "connected") {
+              var params = videoSender.getParameters();
+              if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+              params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
+              params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
+              params.encodings[0].scaleResolutionDownBy = 1.0;
+              videoSender.setParameters(params);
+            }
+          };
 
           // Audio: MediaRecorder (audio-only) over WebSocket.
           var audioStream = new MediaStream(captureStream.getAudioTracks());
@@ -921,36 +926,6 @@ async function launchBrowser(): Promise<Browser> {
             if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
           };
           recorder.start(20);
-
-          // Create SDP offer and wait for ICE gathering to complete before exposing it. The offer SDP must contain ICE
-          // candidates for werift to connect — without them, the RTP path can't be established.
-          var offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-
-          await new Promise(function(resolve) {
-            if (pc.iceGatheringState === "complete") { resolve(); return; }
-            pc.onicegatheringstatechange = function() {
-              if (pc.iceGatheringState === "complete") resolve();
-            };
-            // Timeout after 5 seconds in case ICE gathering stalls.
-            setTimeout(resolve, 5000);
-          });
-
-          // Use the local description which now includes gathered ICE candidates.
-          globalThis.WEBRTC_OFFER = pc.localDescription.sdp;
-          globalThis.WEBRTC_READY = true;
-
-          // Force bitrate after connection establishes.
-          pc.onconnectionstatechange = function() {
-            if (pc.connectionState === "connected") {
-              var params = videoSender.getParameters();
-              if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-              params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
-              params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
-              params.encodings[0].scaleResolutionDownBy = 1.0;
-              videoSender.setParameters(params);
-            }
-          };
 
           activeCaptures.set(index, { pc: pc, recorder: recorder, stream: captureStream, ws: ws });
         };

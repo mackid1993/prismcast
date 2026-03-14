@@ -488,34 +488,51 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       // Video arrives via WebRTC RTP (depacketized by werift to Annex B H264). Audio arrives via WebSocket (0x02 prefix, WebM/Opus).
       // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
       let useWebRTC = false;
-      let webrtcPeer: Nullable<{ videoStream: Readable; createAnswer: (offer: string) => Promise<string>; close: () => void }> = null;
+      let webrtcPeer: Nullable<{ offer: string; setAnswer: (answer: string) => Promise<void>; videoStream: Readable; close: () => void }> = null;
 
-      // Check if the WebRTC monkey-patch is active by waiting for the SDP offer.
+      // Check if the WebRTC monkey-patch is active, then do signaling: werift offers, Chrome answers.
       const { getExtensionPage: getExtPage } = await import("puppeteer-stream");
       const extensionPage = await getExtPage(await getCurrentBrowser());
 
       try {
 
-        await extensionPage.waitForFunction("globalThis.WEBRTC_READY === true", { timeout: 3000 });
-        const offer = await extensionPage.evaluate("globalThis.WEBRTC_OFFER") as string;
+        const patched = await extensionPage.evaluate("globalThis.WEBRTC_PATCHED === true") as boolean;
 
-        if(offer) {
+        if(patched) {
 
-          LOG.info("WebRTC SDP offer received, creating werift peer...");
+          LOG.info("WebRTC patch detected, creating werift peer...");
 
           const { createWebRTCCapturePeer } = await import("../utils/webrtcCapture.js");
 
-          webrtcPeer = createWebRTCCapturePeer(streamId);
-          const answer = await webrtcPeer.createAnswer(offer);
+          // werift creates the offer (as receiver requesting video).
+          const peer = await createWebRTCCapturePeer(streamId);
 
-          await extensionPage.evaluate("WEBRTC_SET_ANSWER(" + JSON.stringify(answer) + ")");
+          // Send werift's offer to Chrome, get Chrome's answer back.
+          const answerSdp = await extensionPage.evaluate(
+            "globalThis.WEBRTC_CONNECT(" + JSON.stringify(peer.offer) + ")"
+          ) as string;
 
-          useWebRTC = true;
-          LOG.info("WebRTC capture established.");
+          if(answerSdp) {
+
+            await peer.setAnswer(answerSdp);
+            webrtcPeer = peer;
+            useWebRTC = true;
+            LOG.info("WebRTC capture established.");
+          } else {
+
+            LOG.warn("WebRTC: Chrome returned no answer SDP.");
+            peer.close();
+          }
         }
-      } catch {
+      } catch(err) {
 
-        LOG.info("WebRTC not available, using standard MediaRecorder.");
+        LOG.warn("WebRTC signaling failed: %s. Falling back to MediaRecorder.", formatError(err));
+
+        if(webrtcPeer) {
+
+          webrtcPeer.close();
+          webrtcPeer = null;
+        }
       }
 
       if(useWebRTC && webrtcPeer) {
