@@ -906,7 +906,7 @@ async function launchBrowser(): Promise<Browser> {
               height: height,
               framerate: frameRate,
               bitrate: bitrate,
-              hardwareAcceleration: "no-preference",
+              hardwareAcceleration: "prefer-hardware",
               avc: { format: "annexb" }
             });
             sendDiag("encoder-configured:state=" + encoder.state);
