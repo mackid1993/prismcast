@@ -388,9 +388,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       audioBitsPerSecond: CONFIG.streaming.audioBitsPerSecond,
       mimeType: captureMimeType,
       video: true,
-      // On Linux, set capture bitrate absurdly high (100Mbps) so MediaRecorder's software encoder never feels pressure to drop frames. The actual output bitrate is
-      // controlled by FFmpeg's h264_vaapi re-encode. On macOS, VideoToolbox doesn't drop frames so we use the configured bitrate directly.
-      videoBitsPerSecond: (process.platform === "linux") ? 100000000 : CONFIG.streaming.videoBitsPerSecond,
+      videoBitsPerSecond: CONFIG.streaming.videoBitsPerSecond,
       videoConstraints: {
 
         mandatory: {
