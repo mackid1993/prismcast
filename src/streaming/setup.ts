@@ -488,6 +488,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       // Video arrives via WebRTC RTP (depacketized by WebRTC to Annex B H264). Audio arrives via WebSocket (0x02 prefix, WebM/Opus).
       // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
       let useWebRTC = false;
+      let h264Passthrough = false;
       let webrtcPeer: Nullable<{
         audioFormat: Promise<{ bitsPerSample: number; channelCount: number; sampleRate: number }>;
         audioStream: Readable;
@@ -517,13 +518,34 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           const peer = await createWebRTCCapturePeer(streamId);
 
           // Send WebRTC's offer to Chrome, get Chrome's answer back.
-          const answerSdp = await extensionPage.evaluate(
+          // Returns JSON with { sdp, h264Passthrough } — h264Passthrough indicates encoded H264 frames
+          // are being sent over WebSocket (0x03 prefix) via Chrome's Encoded Transform API.
+          const connectResult = await extensionPage.evaluate(
             "globalThis.WEBRTC_CONNECT(" + JSON.stringify(peer.offer) + ")"
           ) as string;
+
+          let answerSdp = "";
+
+          try {
+
+            const parsed = JSON.parse(connectResult) as { h264Passthrough: boolean; sdp: string };
+
+            answerSdp = parsed.sdp;
+            h264Passthrough = parsed.h264Passthrough;
+          } catch {
+
+            // Legacy format: plain SDP string.
+            answerSdp = connectResult;
+          }
 
           if(answerSdp) {
 
             await peer.setAnswer(answerSdp);
+
+            if(h264Passthrough) {
+
+              LOG.info("WebRTC: H264 passthrough enabled (Encoded Transform API).");
+            }
 
             // Trickle ICE: send WebRTC's candidates to Chrome. The offer SDP doesn't include candidates (WebRTC bug in Docker),
             // so Chrome needs them via addIceCandidate() to know where to send RTP.
@@ -558,10 +580,64 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         }
       }
 
-      if(useWebRTC && webrtcPeer) {
+      if(useWebRTC && webrtcPeer && h264Passthrough && rawCaptureStream) { // eslint-disable-line @typescript-eslint/no-unnecessary-condition
 
-        // WebRTC mode: wait for first frame and audio format before spawning FFmpeg.
-        LOG.info("WebRTC: waiting for first frame dimensions...");
+        // H264 passthrough mode: Chrome's Encoded Transform API intercepts H264 frames before RTP packetization
+        // and sends them over WebSocket (0x03 prefix). FFmpeg copies the video through unchanged — zero CPU for video.
+        LOG.info("WebRTC: H264 passthrough mode — waiting for audio format...");
+        const audioFmt = await webrtcPeer.audioFormat;
+
+        const { spawnH264PassthroughFFmpeg } = await import("../utils/ffmpeg.js");
+        const ffmpeg = spawnH264PassthroughFFmpeg(CONFIG.streaming.audioBitsPerSecond,
+          audioFmt.sampleRate, audioFmt.channelCount,
+          ffmpegError, streamId, comment);
+
+        ffmpegProcess = {
+
+          ...ffmpeg,
+          kill: (): void => {
+
+            ffmpeg.kill();
+            webrtcPeer.close();
+          }
+        };
+
+        // Parse the rawCaptureStream for H264 frames (0x03 prefix). puppeteer-stream writes raw WebSocket
+        // messages to the stream — each message starts with a prefix byte identifying the data type.
+        if(ffmpeg.videoPipe) {
+
+          rawCaptureStream.on("data", (data: Buffer) => {
+
+            if((data.length > 2) && (data[0] === 0x03) && ffmpeg.videoPipe) {
+
+              // 0x03 prefix = H264 encoded frame from Encoded Transform. Byte 1 = keyframe flag, rest is H264 data.
+              ffmpeg.videoPipe.write(data.subarray(2));
+            }
+          });
+        }
+
+        // Audio still via RTCAudioSink (decoded PCM) — same as rawvideo path.
+        if(ffmpeg.audioPipe) {
+
+          webrtcPeer.audioStream.pipe(ffmpeg.audioPipe);
+        }
+
+        ffmpeg.stdout.on("error", (error) => {
+
+          const errorMessage = formatError(error);
+
+          if(!errorMessage.includes("EPIPE")) {
+
+            LOG.error("H264 passthrough FFmpeg stdout error: %s.", errorMessage);
+          }
+        });
+
+        outputStream = ffmpeg.stdout;
+        LOG.info("H264 passthrough: video copy + PCM audio → fMP4.");
+      } else if(useWebRTC && webrtcPeer) {
+
+        // WebRTC rawvideo mode (fallback): RTCVideoSink gives decoded I420 frames, re-encoded by FFmpeg.
+        LOG.info("WebRTC: rawvideo mode — waiting for first frame dimensions...");
         const [ audioFmt, dims ] = await Promise.all([ webrtcPeer.audioFormat, webrtcPeer.firstFrameDimensions ]);
 
         const viewport = getEffectiveViewport(CONFIG);
@@ -582,14 +658,13 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           }
         };
 
-        // Pipe WebRTC's H264 video stream to FFmpeg's video pipe (fd 3).
+        // Pipe WebRTC's I420 video stream to FFmpeg's video pipe (fd 3).
         if(ffmpeg.videoPipe) {
 
           webrtcPeer.videoStream.pipe(ffmpeg.videoPipe);
         }
 
         // Pipe WebRTC audio (raw PCM from RTCAudioSink) to FFmpeg's audio pipe (fd 4).
-        // Both video and audio come from the same WebRTC connection — perfectly synchronized.
         if(ffmpeg.audioPipe) {
 
           webrtcPeer.audioStream.pipe(ffmpeg.audioPipe);

@@ -434,7 +434,7 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     );
   } else {
 
-    const swCrop = needsCrop ? ["-vf", cropFilter.slice(0, -1)] : [];
+    const swCrop = needsCrop ? [ "-vf", cropFilter.slice(0, -1) ] : [];
 
     ffmpegArgs.push(
       ...swCrop,
@@ -512,6 +512,140 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     } else if(signal) {
 
       onError(new Error("WebRTC FFmpeg killed by signal " + signal + "."));
+    }
+  });
+
+  ffmpeg.on("error", (error) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    onError(error);
+  });
+
+  const kill = (): void => {
+
+    shuttingDown = true;
+
+    if(!ffmpeg.killed) {
+
+      ffmpeg.kill("SIGTERM");
+    }
+  };
+
+  const videoPipe = ffmpeg.stdio[3] as Writable;
+  const audioPipe = ffmpeg.stdio[4] as Writable;
+
+  return {
+
+    audioPipe,
+    kill,
+    process: ffmpeg,
+    stdin: ffmpeg.stdin as unknown as Writable,
+    stdout: ffmpeg.stdout!,
+    videoPipe
+  };
+}
+
+/**
+ * Spawns an FFmpeg process for H264 passthrough mode. Accepts pre-encoded H264 Annex B on fd 3 (from Chrome's Encoded Transform API)
+ * and raw PCM audio on fd 4 (from RTCAudioSink). Video is copied through unchanged — zero CPU for video encoding.
+ * @param audioBitrate - Audio bitrate in bits per second.
+ * @param audioSampleRate - Audio sample rate detected from RTCAudioSink.
+ * @param audioChannels - Audio channel count detected from RTCAudioSink.
+ * @param onError - Callback invoked when FFmpeg exits unexpectedly.
+ * @param streamId - Stream identifier for logging.
+ * @param comment - Optional metadata comment.
+ * @returns FFmpeg process with videoPipe (fd 3), audioPipe (fd 4), stdout for fMP4 output.
+ */
+export function spawnH264PassthroughFFmpeg(audioBitrate: number,
+  audioSampleRate: number, audioChannels: number,
+  onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
+
+  const ffmpegPath = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
+  const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
+
+  const ffmpegArgs = [
+    "-hide_banner",
+    "-loglevel", "info",
+    "-progress", "pipe:2",
+    // Input 0: H264 Annex B from Chrome's Encoded Transform API. Pre-encoded by Chrome's hardware encoder — no decode or re-encode needed.
+    "-f", "h264",
+    "-i", "pipe:3",
+    // Input 1: raw s16le PCM audio from RTCAudioSink.
+    "-use_wallclock_as_timestamps", "1",
+    "-f", "s16le",
+    "-ar", String(audioSampleRate),
+    "-ac", String(audioChannels),
+    "-i", "pipe:4",
+    "-map", "0:v",
+    "-map", "1:a",
+    // Video: copy through unchanged. Zero CPU.
+    "-c:v", "copy",
+    // Audio: transcode PCM to AAC.
+    "-c:a", aacEncoder,
+    "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1000:first_pts=0",
+    "-f", "mp4",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-flush_packets", "1",
+    "-max_muxing_queue_size", "4096"
+  ];
+
+  LOG.info("H264 passthrough FFmpeg: using %s (video copy, zero re-encode).", ffmpegPath);
+
+  if(comment) {
+
+    ffmpegArgs.push("-metadata", "comment=PrismCast - " + comment);
+  }
+
+  ffmpegArgs.push("pipe:1");
+
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+
+    stdio: [ "ignore", "pipe", "pipe", "pipe", "pipe" ]
+  });
+
+  const logPrefix = streamId ? "[" + streamId + "] " : "";
+  let shuttingDown = false;
+
+  ffmpeg.stderr!.on("data", (data: Buffer) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    const lines = data.toString().split("\n");
+
+    for(const line of lines) {
+
+      const trimmed = line.trim();
+
+      if((trimmed.length === 0) || trimmed.includes("=") || [ "Discarding", "Avi ", "Avi:", "Last message" ].some((p) => trimmed.includes(p))) {
+
+        continue;
+      }
+
+      LOG.debug("streaming:ffmpeg", "%sH264 passthrough FFmpeg: %s", logPrefix, trimmed);
+    }
+  });
+
+  ffmpeg.on("exit", (code, signal) => {
+
+    if(shuttingDown || (signal === "SIGTERM")) {
+
+      return;
+    }
+
+    if((code !== null) && (code !== 0)) {
+
+      onError(new Error("H264 passthrough FFmpeg exited with code " + String(code) + "."));
+    } else if(signal) {
+
+      onError(new Error("H264 passthrough FFmpeg killed by signal " + signal + "."));
     }
   });
 

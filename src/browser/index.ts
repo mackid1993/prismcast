@@ -866,7 +866,28 @@ async function launchBrowser(): Promise<Browser> {
           entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
           if (audioTrack) entry.pc.addTrack(audioTrack, entry.stream);
 
-          // Force bitrate, framerate, and resolution on the sender BEFORE negotiation.
+          // Intercept H264 frames IMMEDIATELY after addTrack, before any negotiation.
+          // createEncodedStreams() throws "Too late" if called after setParameters or setRemoteDescription.
+          if (entry.videoSender.createEncodedStreams) {
+            var streams = entry.videoSender.createEncodedStreams();
+            var h264Transform = new TransformStream({
+              transform: function(encodedFrame, controller) {
+                if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+                  var frameData = new Uint8Array(encodedFrame.data);
+                  var msg = new Uint8Array(2 + frameData.byteLength);
+                  msg[0] = 0x03;
+                  msg[1] = encodedFrame.type === "key" ? 1 : 0;
+                  msg.set(frameData, 2);
+                  entry.ws.send(msg.buffer);
+                }
+                controller.enqueue(encodedFrame);
+              }
+            });
+            streams.readable.pipeThrough(h264Transform).pipeTo(streams.writable);
+            entry.h264Passthrough = true;
+          }
+
+          // Force bitrate, framerate, and resolution on the sender.
           var params = entry.videoSender.getParameters();
           if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
           params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
@@ -917,8 +938,11 @@ async function launchBrowser(): Promise<Browser> {
             await entry.videoSender.setParameters(params);
           }
 
-          // 6. Return FULL localDescription (with ICE candidates) — not the original answer
-          return entry.pc.localDescription.sdp;
+          // 6. Return FULL localDescription (with ICE candidates) and H264 passthrough status.
+          return JSON.stringify({
+            h264Passthrough: !!entry.h264Passthrough,
+            sdp: entry.pc.localDescription.sdp
+          });
         };
 
         // Node.js calls this to add WebRTC's ICE candidates via trickle ICE.
