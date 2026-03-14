@@ -846,7 +846,7 @@ async function launchBrowser(): Promise<Browser> {
 
         globalThis.START_RECORDING = async function(opts) {
           var index = opts.index;
-          var port = opts.port;
+          var port = window.location.hash.substring(1);
           var videoConstraints = opts.videoConstraints;
 
           var captureStream = await new Promise(function(resolve, reject) {
