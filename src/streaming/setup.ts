@@ -605,7 +605,11 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         // Route rawCaptureStream data: H264 video (0x03) to video pipe, WebM/Opus audio (0x02) to audio pipe.
         // Audio flows immediately — MediaRecorder starts before WebRTC connects, but FFmpeg handles the
         // A/V offset via aresample=async. No buffering/dropping needed.
-        const ANNEX_B_START_CODE = Buffer.from([ 0x00, 0x00, 0x00, 0x01 ]);
+        //
+        // Each H264 frame is prepended with an Access Unit Delimiter (AUD) NAL. Without AUDs, FFmpeg's
+        // h264 parser can't distinguish frame boundaries when multiple frames arrive in the same pipe
+        // read — it merges them into giant access units, breaking timestamp assignment entirely.
+        const AUD_NAL = Buffer.from([ 0x00, 0x00, 0x00, 0x01, 0x09, 0xf0 ]);
         let h264FrameCount = 0;
 
         rawCaptureStream.on("data", (data: Buffer) => {
@@ -626,23 +630,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
             h264FrameCount++;
 
-            // Ensure Annex B format: if data doesn't start with start code, prepend one.
-            const hasStartCode = (h264Data.length >= 4) &&
-              (((h264Data[0] === 0x00) && (h264Data[1] === 0x00) && (h264Data[2] === 0x00) && (h264Data[3] === 0x01)) ||
-              ((h264Data[0] === 0x00) && (h264Data[1] === 0x00) && (h264Data[2] === 0x01)));
-
-            if(hasStartCode) {
-
-              ffmpeg.videoPipe.write(h264Data);
-            } else {
-
-              if(h264FrameCount === 1) {
-
-                LOG.info("H264 passthrough: injecting Annex B start codes (data is not Annex B).");
-              }
-
-              ffmpeg.videoPipe.write(Buffer.concat([ ANNEX_B_START_CODE, h264Data ]));
-            }
+            // Write AUD + frame data. AUD tells FFmpeg "new access unit starts here" so each
+            // Encoded Transform frame gets its own PTS from -framerate.
+            ffmpeg.videoPipe.write(AUD_NAL);
+            ffmpeg.videoPipe.write(h264Data);
           } else if((data.length > 1) && (data[0] === 0x02) && ffmpeg.audioPipe) {
 
             // WebM/Opus audio from MediaRecorder. Flows continuously — FFmpeg probes the WebM header
