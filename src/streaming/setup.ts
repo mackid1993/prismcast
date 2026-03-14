@@ -488,7 +488,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       // Video arrives via WebRTC RTP (depacketized by werift to Annex B H264). Audio arrives via WebSocket (0x02 prefix, WebM/Opus).
       // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
       let useWebRTC = false;
-      let webrtcPeer: Nullable<{ offer: string; setAnswer: (answer: string) => Promise<void>; videoStream: Readable; close: () => void }> = null;
+      let webrtcPeer: Nullable<{ candidates: string[]; offer: string; setAnswer: (answer: string) => Promise<void>; videoStream: Readable; close: () => void }> = null;
 
       // Check if the WebRTC monkey-patch is active, then do signaling: werift offers, Chrome answers.
       const { getExtensionPage: getExtPage } = await import("puppeteer-stream");
@@ -515,6 +515,19 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           if(answerSdp) {
 
             await peer.setAnswer(answerSdp);
+
+            // Trickle ICE: send werift's candidates to Chrome. The offer SDP doesn't include candidates (werift bug in Docker),
+            // so Chrome needs them via addIceCandidate() to know where to send RTP.
+            if(peer.candidates.length > 0) {
+
+              LOG.info("Sending %d ICE candidates to Chrome via trickle ICE.", peer.candidates.length);
+
+              for(const candidate of peer.candidates) {
+
+                await extensionPage.evaluate("globalThis.WEBRTC_ADD_CANDIDATE(" + JSON.stringify(candidate) + ")");
+              }
+            }
+
             webrtcPeer = peer;
             useWebRTC = true;
             LOG.info("WebRTC capture established.");

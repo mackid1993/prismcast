@@ -19,6 +19,10 @@ import type { Readable } from "node:stream";
 export interface WebRTCCapturePeer {
 
   // The SDP offer to send to Chrome (werift is the offerer).
+  // Collected ICE candidates as JSON strings for trickle ICE.
+  candidates: string[];
+
+  // The SDP offer to send to Chrome (werift is the offerer).
   offer: string;
 
   // Set Chrome's SDP answer on the peer.
@@ -172,28 +176,23 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   pliInterval.unref();
 
-  // Collect ICE candidates via events. werift's localDescription may not include candidates in Docker because the veth filter leaves no interfaces for the
-  // standard gathering path. iceAdditionalHostAddresses bypasses the filter but candidates arrive asynchronously via onIceCandidate events.
+  // Collect ICE candidates via events for trickle ICE. werift's localDescription doesn't include candidates in Docker, so we send them to Chrome separately
+  // via addIceCandidate() after the SDP exchange.
   const collectedCandidates: string[] = [];
 
   pc.onIceCandidate.subscribe((candidate) => {
 
     if(candidate) {
 
-      // Format as SDP candidate line.
-      const line = "a=" + candidate.candidate;
-
-      collectedCandidates.push(line);
-      LOG.info("%sWebRTC: ICE candidate gathered: %s", logPrefix, candidate.candidate.substring(0, 60));
+      collectedCandidates.push(JSON.stringify(candidate));
+      LOG.info("%sWebRTC: ICE candidate gathered: %s", logPrefix, String(candidate.candidate).substring(0, 60));
     }
   });
 
   // Create the offer.
   await pc.setLocalDescription(await pc.createOffer());
 
-  LOG.info("%sWebRTC: ICE gathering state: %s", logPrefix, pc.iceGatheringState);
-
-  // Wait for ICE gathering to complete — candidates arrive async.
+  // Wait for ICE gathering to complete.
   await new Promise<void>((resolve) => {
 
     if(pc.iceGatheringState === "complete") {
@@ -216,37 +215,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   LOG.info("%sWebRTC: gathered %d ICE candidates.", logPrefix, collectedCandidates.length);
 
-  // Build the offer SDP. If localDescription already has candidates (macOS), use it as-is. Otherwise, manually inject the collected candidates.
-  let offerSdp = pc.localDescription?.sdp ?? "";
-
-  if(!offerSdp.includes("a=candidate") && (collectedCandidates.length > 0)) {
-
-    // Inject candidates before the first m= line's attributes end (before the next m= or end of SDP).
-    const lines = offerSdp.split("\r\n");
-    const injected: string[] = [];
-
-    for(const line of lines) {
-
-      injected.push(line);
-
-      // Add candidates after the media line attributes.
-      if(line.startsWith("a=rtpmap")) {
-
-        for(const candidate of collectedCandidates) {
-
-          injected.push(candidate);
-        }
-      }
-    }
-
-    offerSdp = injected.join("\r\n");
-    LOG.info("%sWebRTC: injected %d candidates into offer SDP.", logPrefix, collectedCandidates.length);
-  }
-
-  // Log the offer SDP media lines for debugging.
-  const offerLines = offerSdp.split("\n").filter((l: string) => l.startsWith("m=") || l.startsWith("a=recvonly") || l.startsWith("a=sendonly") || l.startsWith("a=sendrecv") || l.startsWith("a=inactive") || l.startsWith("a=rtpmap"));
-
-  LOG.info("%sWebRTC offer SDP: %s", logPrefix, offerLines.join(" | "));
+  const offerSdp = pc.localDescription?.sdp ?? "";
 
   const setAnswer = async (answer: string): Promise<void> => {
 
@@ -286,6 +255,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   return {
 
+    candidates: collectedCandidates,
     close,
     offer: offerSdp,
     setAnswer,

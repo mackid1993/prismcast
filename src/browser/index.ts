@@ -891,6 +891,14 @@ async function launchBrowser(): Promise<Browser> {
           return entry.pc.localDescription.sdp;
         };
 
+        // Node.js calls this to add werift's ICE candidates via trickle ICE.
+        globalThis.WEBRTC_ADD_CANDIDATE = function(candidateJson) {
+          var entry = activeCaptures.values().next().value;
+          if (entry && entry.pc) {
+            entry.pc.addIceCandidate(JSON.parse(candidateJson));
+          }
+        };
+
         // Signal that the monkey-patch is installed and ready.
         globalThis.WEBRTC_PATCHED = true;
 
