@@ -868,6 +868,32 @@ async function launchBrowser(): Promise<Browser> {
           entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
           if (audioTrack) entry.pc.addTrack(audioTrack, entry.stream);
 
+          // Force H264 encoding via setCodecPreferences. The native peer's offer includes a synthetic
+          // H264 PT — we need Chrome's transceiver to prefer it so the encoder uses H264 instead of VP8.
+          try {
+            var videoTransceiver = entry.pc.getTransceivers().find(function(t) {
+              return t.sender === entry.videoSender;
+            });
+            if (videoTransceiver && videoTransceiver.setCodecPreferences) {
+              var capabilities = RTCRtpSender.getCapabilities("video");
+              if (capabilities) {
+                var h264Codecs = capabilities.codecs.filter(function(c) {
+                  return c.mimeType === "video/H264";
+                });
+                if (h264Codecs.length > 0) {
+                  // H264 first, then everything else as fallback.
+                  var otherCodecs = capabilities.codecs.filter(function(c) {
+                    return c.mimeType !== "video/H264";
+                  });
+                  videoTransceiver.setCodecPreferences(h264Codecs.concat(otherCodecs));
+                  console.log("[PrismCast] setCodecPreferences: H264 preferred (" + h264Codecs.length + " profiles).");
+                }
+              }
+            }
+          } catch(e) {
+            console.warn("[PrismCast] setCodecPreferences failed:", e);
+          }
+
           // Intercept H264 frames IMMEDIATELY after addTrack, before any negotiation.
           // createEncodedStreams() throws "Too late" if called after setParameters or setRemoteDescription.
           if (entry.videoSender.createEncodedStreams) {

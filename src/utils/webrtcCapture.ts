@@ -197,14 +197,15 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
     setTimeout(resolve, 10000);
   });
 
-  // Reorder SDP to prefer H264 over VP8/VP9. Chrome picks the first codec in the m-line, so without this
-  // it defaults to VP8. We find the H264 payload type(s) and move them to the front of the video m-line.
+  // Force H264 in the SDP offer. @roamhq/wrtc doesn't include H264 (no OpenH264), so we inject it
+  // synthetically. Chrome will see H264 in the offer and encode H264 — the Encoded Transform API
+  // intercepts the frames before RTP, so the native peer never needs to decode H264.
   let offerSdp = pc.localDescription?.sdp ?? "";
   const videoMLine = /^(m=video \d+ [A-Z/]+ )([\d ]+)/m.exec(offerSdp);
 
   if(videoMLine) {
 
-    // Find all H264 payload types from a=rtpmap lines.
+    // Find existing H264 payload types (in case a future @roamhq/wrtc version includes them).
     const h264PTs: string[] = [];
     const rtpmapMatches = offerSdp.matchAll(/a=rtpmap:(\d+) H264\//gi);
 
@@ -215,7 +216,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
     if(h264PTs.length > 0) {
 
-      // Reorder: H264 payload types first, then everything else.
+      // H264 already present — just reorder to prefer it.
       const allPTs = videoMLine[2].trim().split(/\s+/);
       const reordered = [ ...h264PTs, ...allPTs.filter((pt) => !h264PTs.includes(pt)) ];
 
@@ -223,7 +224,38 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
       LOG.info("%sWebRTC: SDP reordered to prefer H264 (PTs: %s).", logPrefix, h264PTs.join(", "));
     } else {
 
-      LOG.warn("%sWebRTC: no H264 codec found in SDP offer — Chrome will use VP8.", logPrefix);
+      // Inject H264 synthetically. Pick a PT not already in use.
+      const usedPTs = new Set(videoMLine[2].trim().split(/\s+/));
+      let h264PT = "126";
+
+      for(let pt = 126; pt >= 96; pt--) {
+
+        if(!usedPTs.has(String(pt))) {
+
+          h264PT = String(pt);
+
+          break;
+        }
+      }
+
+      // Add H264 PT to front of m-line so Chrome prefers it.
+      offerSdp = offerSdp.replace(videoMLine[0], videoMLine[1] + h264PT + " " + videoMLine[2].trim());
+
+      // Insert H264 rtpmap/fmtp/rtcp-fb lines after the video m-line. Constrained Baseline Profile (42e01f)
+      // is the most widely supported H264 profile in WebRTC.
+      const h264Attrs = [
+        "a=rtpmap:" + h264PT + " H264/90000",
+        "a=fmtp:" + h264PT + " level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+        "a=rtcp-fb:" + h264PT + " nack",
+        "a=rtcp-fb:" + h264PT + " nack pli",
+        "a=rtcp-fb:" + h264PT + " goog-remb",
+        "a=rtcp-fb:" + h264PT + " transport-cc"
+      ].join("\r\n");
+
+      // Insert after the m=video line.
+      offerSdp = offerSdp.replace(videoMLine[0], videoMLine[0] + "\r\n" + h264Attrs);
+
+      LOG.info("%sWebRTC: injected H264 into SDP offer (PT %s).", logPrefix, h264PT);
     }
   }
 

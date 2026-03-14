@@ -608,6 +608,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         // must be preserved or FFmpeg can't parse subsequent audio clusters.
         const ANNEX_B_START_CODE = Buffer.from([ 0x00, 0x00, 0x00, 0x01 ]);
         let h264FrameCount = 0;
+        let audioChunkCount = 0;
         let audioBuffered: Buffer[] = [];
 
         rawCaptureStream.on("data", (data: Buffer) => {
@@ -672,6 +673,13 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
               return;
             }
 
+            audioChunkCount++;
+
+            if(audioChunkCount === 1) {
+
+              LOG.info("H264 passthrough: first audio chunk after video sync, %d bytes.", data.length - 1);
+            }
+
             // WebM/Opus audio chunk from MediaRecorder. Strip prefix, pipe to FFmpeg.
             ffmpeg.audioPipe.write(data.subarray(1));
           }
@@ -688,7 +696,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         });
 
         outputStream = ffmpeg.stdout;
-        LOG.info("H264 passthrough: video copy + PCM audio → fMP4.");
+        LOG.info("H264 passthrough: video copy + WebM/Opus audio → fMP4.");
       } else if(useWebRTC && webrtcPeer) {
 
         // WebRTC rawvideo mode (fallback): RTCVideoSink gives decoded I420 frames, re-encoded by FFmpeg.
