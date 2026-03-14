@@ -829,6 +829,128 @@ async function launchBrowser(): Promise<Browser> {
       const extensionPage = await getExtensionPage(currentBrowser);
 
       await extensionPage.waitForFunction("typeof START_RECORDING === 'function'", { timeout: CONFIG.browser.initTimeout });
+
+      // Monkey-patch START_RECORDING to use WebRTC for encoding instead of MediaRecorder. Chrome uses hardware-accelerated encoding for WebRTC (VA-API on Linux,
+      // VideoToolbox on macOS) but software encoding for MediaRecorder. By routing the tabCapture stream through a local RTCPeerConnection loopback, we get hardware
+      // encoding with no dropped frames. Encoded H264 frames are intercepted via Insertable Streams (Encoded Transform) and sent over the existing WebSocket.
+      //
+      // Data format: same as WebCodecs approach — 0x01 prefix for video, 0x02 for audio.
+      // Audio still uses MediaRecorder (audio-only) since WebRTC Opus is fine but we need AAC for HLS compatibility via FFmpeg.
+      // eslint-disable-next-line no-restricted-syntax
+      const webrtcPatch = `(function() {
+        var origStopRecording = globalThis.STOP_RECORDING;
+        var activeCaptures = new Map();
+
+        globalThis.START_RECORDING = async function(opts) {
+          var index = opts.index;
+          var port = window.location.hash.substring(1);
+
+          // Get tab capture stream.
+          var captureStream = await new Promise(function(resolve, reject) {
+            chrome.tabCapture.capture({ audio: true, video: true }, function(stream) {
+              if (!stream || chrome.runtime.lastError) {
+                reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || "tabCapture failed"));
+                return;
+              }
+              resolve(stream);
+            });
+          });
+
+          // Connect to puppeteer-stream WebSocket.
+          var ws = new WebSocket("ws://localhost:" + port + "/?index=" + index);
+          await new Promise(function(resolve, reject) {
+            ws.onopen = resolve;
+            ws.onerror = reject;
+          });
+          ws.binaryType = "arraybuffer";
+
+          // Create local WebRTC loopback — sender encodes with hardware, we intercept the encoded frames.
+          var sender = new RTCPeerConnection({ encodedInsertableStreams: true });
+          var receiver = new RTCPeerConnection({ encodedInsertableStreams: true });
+
+          // Route ICE candidates between the local peers.
+          sender.onicecandidate = function(e) {
+            if (e.candidate) receiver.addIceCandidate(e.candidate);
+          };
+          receiver.onicecandidate = function(e) {
+            if (e.candidate) sender.addIceCandidate(e.candidate);
+          };
+
+          // Add video track to sender — this triggers hardware encoding.
+          var videoTrack = captureStream.getVideoTracks()[0];
+          var videoSender = sender.addTrack(videoTrack, captureStream);
+
+          // Intercept encoded video frames from the sender using Insertable Streams.
+          var senderStreams = videoSender.createEncodedStreams();
+          var reader = senderStreams.readable.getReader();
+
+          // Pump encoded video frames to WebSocket.
+          (async function pumpVideo() {
+            try {
+              while (true) {
+                var result = await reader.read();
+                if (result.done) break;
+                var frame = result.value;
+                var data = new Uint8Array(frame.data);
+                var msg = new Uint8Array(1 + data.length);
+                msg[0] = 0x01;
+                msg.set(data, 1);
+                if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
+              }
+            } catch(e) { /* stream closed */ }
+          })();
+
+          // Audio: use MediaRecorder (audio-only) — WebRTC Opus is fine but we need the WebM container for FFmpeg.
+          var audioStream = new MediaStream(captureStream.getAudioTracks());
+          var recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm;codecs=opus" });
+          recorder.ondataavailable = async function(e) {
+            if (!e.data.size) return;
+            var buffer = await e.data.arrayBuffer();
+            var msg = new Uint8Array(1 + buffer.byteLength);
+            msg[0] = 0x02;
+            msg.set(new Uint8Array(buffer), 1);
+            if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
+          };
+          recorder.start(20);
+
+          // Complete the SDP negotiation to start encoding.
+          var offer = await sender.createOffer();
+          await sender.setLocalDescription(offer);
+          await receiver.setRemoteDescription(offer);
+          var answer = await receiver.createAnswer();
+          await receiver.setLocalDescription(answer);
+          await sender.setRemoteDescription(answer);
+
+          activeCaptures.set(index, { sender: sender, receiver: receiver, recorder: recorder, stream: captureStream, ws: ws });
+        };
+
+        globalThis.STOP_RECORDING = function(index) {
+          if (index !== undefined) {
+            var entry = activeCaptures.get(index);
+            if (entry) {
+              try { entry.sender.close(); } catch(e) {}
+              try { entry.receiver.close(); } catch(e) {}
+              try { entry.recorder.stop(); } catch(e) {}
+              try { entry.ws.close(); } catch(e) {}
+              entry.stream.getTracks().forEach(function(t) { t.stop(); });
+              activeCaptures.delete(index);
+            }
+          } else {
+            activeCaptures.forEach(function(entry, key) {
+              try { entry.sender.close(); } catch(e) {}
+              try { entry.receiver.close(); } catch(e) {}
+              try { entry.recorder.stop(); } catch(e) {}
+              try { entry.ws.close(); } catch(e) {}
+              entry.stream.getTracks().forEach(function(t) { t.stop(); });
+              activeCaptures.delete(key);
+            });
+          }
+          origStopRecording(index);
+        };
+      })()`;
+
+      await extensionPage.evaluate(webrtcPatch);
+      LOG.info("WebRTC capture monkey-patch installed (hardware encoding via RTCPeerConnection loopback).");
     } catch {
 
       // If the extension page isn't found or START_RECORDING doesn't appear within the timeout, log a warning and proceed. The per-stream

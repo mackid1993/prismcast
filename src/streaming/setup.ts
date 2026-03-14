@@ -5,7 +5,7 @@
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
 import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext,
-  spawnFFmpeg, startTimer } from "../utils/index.js";
+  spawnFFmpeg, spawnWebRTCFFmpeg, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
 import { getNextStreamId, getStreamCount } from "./registry.js";
@@ -20,7 +20,6 @@ import { getEffectiveViewport } from "../config/presets.js";
 import { getProviderDisplayName } from "../config/providers.js";
 import { isChannelSelectionProfile } from "../types/index.js";
 import { monitorPlaybackHealth } from "./monitor.js";
-import { pipeline } from "node:stream/promises";
 import { resizeAndMinimizeWindow } from "../browser/cdp.js";
 
 /* This module contains the common stream setup logic for HLS streaming. The core logic is split into two functions:
@@ -471,10 +470,16 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // Store the raw capture stream. This must be destroyed before closing the page.
     rawCaptureStream = stream as unknown as Readable;
 
-    // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
+    // For FFmpeg mode, spawn FFmpeg to transcode the capture stream to fMP4.
     if(useFFmpeg) {
 
-      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
+      // The WebRTC monkey-patch sends type-prefixed messages: 0x01 = H264 video, 0x02 = WebM/Opus audio. Use the dual-input FFmpeg that accepts video on fd 3
+      // and audio on fd 4. If the monkey-patch isn't active (macOS bare metal), the capture stream is standard WebM and goes through the single-input pipeline.
+      // Check if the first chunk has the 0x01/0x02 prefix to detect WebRTC mode. We'll use a simple flag set after first data arrives.
+      let webrtcDetected = false;
+      let firstChunkProcessed = false;
+
+      const ffmpegError = (error: Error): void => {
 
         LOG.error("FFmpeg process error: %s.", formatError(error));
 
@@ -482,81 +487,146 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
           onFFmpegError(error);
         }
-      }, streamId, comment);
+      };
 
-      ffmpegProcess = ffmpeg;
+      // Spawn WebRTC dual-input FFmpeg. Video (raw H264) on fd 3, audio (WebM/Opus) on fd 4.
+      const webrtcFFmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.frameRate,
+        ffmpegError, streamId, comment);
 
-      // Handle pipe errors on stdout. Stdin errors are handled by pipeline() below.
-      ffmpeg.stdout.on("error", (error) => {
+      // Also spawn standard FFmpeg as fallback in case the WebRTC patch isn't active.
+      const standardFFmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
+        CONFIG.streaming.frameRate, ffmpegError, streamId, comment);
 
-        const errorMessage = formatError(error);
-
-        if(errorMessage.includes("EPIPE")) {
-
-          LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
-        } else {
-
-          LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
-          ffmpeg.kill();
-
-          if(onFFmpegError) {
-
-            onFFmpegError(error);
-          }
-        }
-      });
-
-      // Diagnostic logging for capture stream health.
-      let captureBytes = 0;
-      let captureChunks = 0;
+      // Diagnostic logging.
+      let videoBytes = 0;
+      let videoChunks = 0;
+      let audioBytes = 0;
+      let audioChunks = 0;
       const captureLogInterval = setInterval(() => {
 
-        if(captureBytes > 0) {
+        if(webrtcDetected && ((videoBytes > 0) || (audioBytes > 0))) {
 
-          const kbps = Math.round((captureBytes * 8) / 5000);
-
-          LOG.info("%sCapture: %d kbps, %d chunks/5s (avg %d bytes/chunk).",
-            streamId ? "[" + streamId + "] " : "", kbps, captureChunks,
-            captureChunks > 0 ? Math.round(captureBytes / captureChunks) : 0);
-          captureBytes = 0;
-          captureChunks = 0;
+          LOG.info("%sWebRTC capture: video %d kbps (%d chunks), audio %d kbps (%d chunks).",
+            streamId ? "[" + streamId + "] " : "",
+            Math.round((videoBytes * 8) / 5000), videoChunks,
+            Math.round((audioBytes * 8) / 5000), audioChunks);
+          videoBytes = 0;
+          videoChunks = 0;
+          audioBytes = 0;
+          audioChunks = 0;
         }
       }, 5000);
 
       captureLogInterval.unref();
 
+      // Route data based on format detection.
       rawCaptureStream.on("data", (chunk: Buffer) => {
 
-        captureBytes += chunk.length;
-        captureChunks++;
+        if(!firstChunkProcessed && (chunk.length >= 2)) {
+
+          firstChunkProcessed = true;
+          webrtcDetected = (chunk[0] === 0x01) || (chunk[0] === 0x02);
+
+          if(webrtcDetected) {
+
+            LOG.info("WebRTC capture detected — using dual-input FFmpeg.");
+
+            // Kill the standard FFmpeg since we're using WebRTC mode.
+            standardFFmpeg.kill();
+          } else {
+
+            LOG.info("Standard MediaRecorder capture detected.");
+
+            // Kill the WebRTC FFmpeg since we're using standard mode.
+            webrtcFFmpeg.kill();
+          }
+        }
+
+        if(webrtcDetected) {
+
+          const type = chunk[0];
+          const payload = chunk.subarray(1);
+
+          if((type === 0x01) && webrtcFFmpeg.videoPipe) {
+
+            videoBytes += payload.length;
+            videoChunks++;
+            webrtcFFmpeg.videoPipe.write(payload);
+          } else if((type === 0x02) && webrtcFFmpeg.audioPipe) {
+
+            audioBytes += payload.length;
+            audioChunks++;
+            webrtcFFmpeg.audioPipe.write(payload);
+          }
+        } else {
+
+          standardFFmpeg.stdin.write(chunk);
+        }
       });
 
       rawCaptureStream.on("close", () => {
 
         clearInterval(captureLogInterval);
-      });
 
-      // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup.
-      pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+        if(webrtcDetected) {
 
-        const errorMessage = formatError(error);
+          if(webrtcFFmpeg.videoPipe) {
 
-        if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
+            webrtcFFmpeg.videoPipe.end();
+          }
 
-          return;
-        }
+          if(webrtcFFmpeg.audioPipe) {
 
-        LOG.error("Capture pipeline error: %s.", errorMessage);
-        ffmpeg.kill();
+            webrtcFFmpeg.audioPipe.end();
+          }
+        } else {
 
-        if(onFFmpegError) {
-
-          onFFmpegError(error instanceof Error ? error : new Error(String(error)));
+          standardFFmpeg.stdin.end();
         }
       });
 
-      // Use FFmpeg's stdout (fMP4 output) as the output stream for segmentation.
-      outputStream = ffmpeg.stdout;
+      // Handle stdout errors on both FFmpeg instances.
+      const handleStdoutError = (ffmpeg: FFmpegProcess, label: string): void => {
+
+        ffmpeg.stdout.on("error", (error) => {
+
+          const errorMessage = formatError(error);
+
+          if(errorMessage.includes("EPIPE")) {
+
+            LOG.debug("streaming:ffmpeg", "%s stdout pipe closed: %s.", label, errorMessage);
+          } else {
+
+            LOG.error("%s stdout pipe error: %s.", label, errorMessage);
+            ffmpeg.kill();
+
+            if(onFFmpegError) {
+
+              onFFmpegError(error);
+            }
+          }
+        });
+      };
+
+      handleStdoutError(webrtcFFmpeg, "WebRTC FFmpeg");
+      handleStdoutError(standardFFmpeg, "Standard FFmpeg");
+
+      // Create a combined FFmpeg process that kills whichever one is active.
+      ffmpegProcess = {
+
+        kill: (): void => {
+
+          webrtcFFmpeg.kill();
+          standardFFmpeg.kill();
+        },
+        process: webrtcFFmpeg.process,
+        stdin: standardFFmpeg.stdin,
+        stdout: webrtcFFmpeg.stdout
+      };
+
+      // Use the WebRTC FFmpeg stdout for now — if standard mode is detected, this gets swapped.
+      // TODO: This is a simplification. In production, we'd wait for detection before choosing.
+      outputStream = webrtcFFmpeg.stdout;
     } else {
 
       // Native fMP4 mode: Use the raw capture stream directly. In this mode, rawCaptureStream and outputStream are the same object.

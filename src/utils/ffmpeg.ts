@@ -155,6 +155,9 @@ export async function resolveFFmpegPath(): Promise<string | undefined> {
  */
 export interface FFmpegProcess {
 
+  // Writable stream for piping audio (WebM/Opus) to FFmpeg. Only present in WebRTC dual-input mode.
+  audioPipe?: Writable;
+
   // Function to gracefully terminate the FFmpeg process.
   kill: () => void;
 
@@ -166,6 +169,9 @@ export interface FFmpegProcess {
 
   // Readable stream for receiving fMP4 output from FFmpeg.
   stdout: Readable;
+
+  // Writable stream for piping video (raw H264) to FFmpeg. Only present in WebRTC dual-input mode.
+  videoPipe?: Writable;
 }
 
 /**
@@ -353,6 +359,132 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
     process: ffmpeg,
     stdin: ffmpeg.stdin,
     stdout: ffmpeg.stdout
+  };
+}
+
+/**
+ * Spawns an FFmpeg process for WebRTC dual-input mode. Accepts raw H264 video on fd 3 and audio-only WebM/Opus on fd 4. Video is copied through; audio is
+ * transcoded from Opus to AAC. Used when the WebRTC capture monkey-patch provides separate video and audio streams.
+ * @param audioBitrate - Audio bitrate in bits per second.
+ * @param frameRate - Frame rate for the raw H264 input (used to generate timestamps).
+ * @param onError - Callback invoked when FFmpeg exits unexpectedly.
+ * @param streamId - Stream identifier for logging.
+ * @param comment - Optional metadata comment.
+ * @returns FFmpeg process with videoPipe (fd 3), audioPipe (fd 4), stdout for fMP4 output.
+ */
+export function spawnWebRTCFFmpeg(audioBitrate: number, frameRate: number, onError: (error: Error) => void,
+  streamId?: string, comment?: string): FFmpegProcess {
+
+  const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
+  const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
+
+  const ffmpegArgs = [
+    "-hide_banner",
+    "-loglevel", "info",
+    "-progress", "pipe:2",
+    "-r", String(frameRate),
+    "-f", "h264",
+    "-i", "pipe:3",
+    "-f", "webm",
+    "-i", "pipe:4",
+    "-map", "0:v",
+    "-map", "1:a",
+    "-c:v", "copy",
+    "-c:a", aacEncoder,
+    "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1",
+    "-f", "mp4",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-flush_packets", "1",
+    "-max_muxing_queue_size", "1024"
+  ];
+
+  if(comment) {
+
+    ffmpegArgs.push("-metadata", "comment=PrismCast - " + comment);
+  }
+
+  ffmpegArgs.push("pipe:1");
+
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+
+    stdio: [ "ignore", "pipe", "pipe", "pipe", "pipe" ]
+  });
+
+  const logPrefix = streamId ? "[" + streamId + "] " : "";
+  let shuttingDown = false;
+
+  // stderr is non-null since stdio[2] is "pipe".
+  ffmpeg.stderr!.on("data", (data: Buffer) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    const message = data.toString().trim();
+    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+
+    for(const line of message.split("\n")) {
+
+      const trimmed = line.trim();
+
+      if((trimmed.length === 0) || trimmed.includes("=") || noisePatterns.some((p) => trimmed.includes(p))) {
+
+        continue;
+      }
+
+      LOG.debug("streaming:ffmpeg", "%sWebRTC FFmpeg: %s", logPrefix, trimmed);
+    }
+  });
+
+  ffmpeg.on("exit", (code, signal) => {
+
+    if(shuttingDown || (signal === "SIGTERM")) {
+
+      return;
+    }
+
+    if((code !== null) && (code !== 0)) {
+
+      onError(new Error("WebRTC FFmpeg exited with code " + String(code) + "."));
+    } else if(signal) {
+
+      onError(new Error("WebRTC FFmpeg killed by signal " + signal + "."));
+    }
+  });
+
+  ffmpeg.on("error", (error) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    onError(error);
+  });
+
+  const kill = (): void => {
+
+    shuttingDown = true;
+
+    if(!ffmpeg.killed) {
+
+      ffmpeg.kill("SIGTERM");
+    }
+  };
+
+  const videoPipe = ffmpeg.stdio[3] as Writable;
+  const audioPipe = ffmpeg.stdio[4] as Writable;
+
+  return {
+
+    audioPipe,
+    kill,
+    process: ffmpeg,
+    stdin: ffmpeg.stdin as unknown as Writable,
+    stdout: ffmpeg.stdout!,
+    videoPipe
   };
 }
 
