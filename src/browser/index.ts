@@ -854,10 +854,40 @@ async function launchBrowser(): Promise<Browser> {
         // This is called from setup.ts AFTER the capture starts.
         globalThis.WEBRTC_CONNECT = async function(offerSdp) {
           var entry = activeCaptures.values().next().value;
-          if (!entry || !entry.pc) return null;
+          if (!entry || !entry.pc || !entry.stream) return null;
+
+          // Set werift's offer first, THEN add the track. This ensures Chrome associates the video track with werift's
+          // transceiver instead of creating a separate one.
           await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
+
+          // Now add the video track — it gets associated with the existing transceiver from the offer.
+          var videoTrack = entry.stream.getVideoTracks()[0];
+          entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
+
+          // Force H264 codec on the transceiver.
+          var transceivers = entry.pc.getTransceivers();
+          if (transceivers.length > 0) {
+            var h264Codecs = RTCRtpReceiver.getCapabilities("video").codecs.filter(function(c) {
+              return c.mimeType === "video/H264";
+            });
+            if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
+          }
+
           var answer = await entry.pc.createAnswer();
           await entry.pc.setLocalDescription(answer);
+
+          // Force bitrate after connection establishes.
+          entry.pc.onconnectionstatechange = function() {
+            if (entry.pc.connectionState === "connected" && entry.videoSender) {
+              var params = entry.videoSender.getParameters();
+              if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+              params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
+              params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
+              params.encodings[0].scaleResolutionDownBy = 1.0;
+              entry.videoSender.setParameters(params);
+            }
+          };
+
           return entry.pc.localDescription.sdp;
         };
 
@@ -887,32 +917,8 @@ async function launchBrowser(): Promise<Browser> {
           ws.binaryType = "arraybuffer";
 
           // Create RTCPeerConnection for video — Chrome answers werift's offer, sends H264 RTP.
+          // Track is added later in WEBRTC_CONNECT after receiving werift's offer to ensure proper transceiver matching.
           var pc = new RTCPeerConnection();
-
-          // Add video track from tabCapture.
-          var videoTrack = captureStream.getVideoTracks()[0];
-          var videoSender = pc.addTrack(videoTrack, captureStream);
-
-          // Force H264 codec.
-          var transceivers = pc.getTransceivers();
-          if (transceivers.length > 0) {
-            var h264Codecs = RTCRtpReceiver.getCapabilities("video").codecs.filter(function(c) {
-              return c.mimeType === "video/H264";
-            });
-            if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
-          }
-
-          // Force bitrate after connection establishes.
-          pc.onconnectionstatechange = function() {
-            if (pc.connectionState === "connected") {
-              var params = videoSender.getParameters();
-              if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-              params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
-              params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
-              params.encodings[0].scaleResolutionDownBy = 1.0;
-              videoSender.setParameters(params);
-            }
-          };
 
           // Audio: MediaRecorder (audio-only) over WebSocket.
           var audioStream = new MediaStream(captureStream.getAudioTracks());
