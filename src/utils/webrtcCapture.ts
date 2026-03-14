@@ -70,7 +70,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
       const sink: any = new wrtc.nonstandard.RTCVideoSink(event.track);
       let frameCount = 0;
 
-      sink.onframe = (frame: { data: Buffer; width: number; height: number }): void => {
+      sink.onframe = (event: { frame: { data: Buffer; width: number; height: number } }): void => {
 
         if(closed) {
 
@@ -80,7 +80,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
         frameCount++;
 
         // Write raw I420 frame data. FFmpeg will encode this.
-        videoOutput.write(frame.data);
+        videoOutput.write(Buffer.from(event.frame.data));
       };
 
       // Log stats.
