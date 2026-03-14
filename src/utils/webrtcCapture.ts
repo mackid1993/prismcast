@@ -215,7 +215,44 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   LOG.info("%sWebRTC: gathered %d ICE candidates.", logPrefix, collectedCandidates.length);
 
-  const offerSdp = pc.localDescription?.sdp ?? "";
+  // Log first candidate structure for debugging.
+  if(collectedCandidates.length > 0) {
+
+    LOG.info("%sWebRTC: candidate sample: %s", logPrefix, collectedCandidates[0].substring(0, 200));
+  }
+
+  // Build offer SDP with candidates injected. werift doesn't include candidates in localDescription, so we insert them manually.
+  let offerSdp = pc.localDescription?.sdp ?? "";
+
+  if(!offerSdp.includes("a=candidate") && (collectedCandidates.length > 0)) {
+
+    // Parse candidates and build SDP candidate lines.
+    const candidateLines: string[] = [];
+
+    for(const candidateJson of collectedCandidates) {
+
+      try {
+
+        const parsed = JSON.parse(candidateJson);
+        const candidateStr = parsed.candidate ?? parsed;
+
+        if(candidateStr && (typeof candidateStr === "string")) {
+
+          candidateLines.push("a=" + candidateStr);
+        }
+      } catch {
+
+        // Skip malformed candidates.
+      }
+    }
+
+    if(candidateLines.length > 0) {
+
+      // Insert candidate lines before "a=recvonly" in the SDP.
+      offerSdp = offerSdp.replace("a=recvonly", candidateLines.join("\r\n") + "\r\na=recvonly");
+      LOG.info("%sWebRTC: injected %d candidates into offer SDP.", logPrefix, candidateLines.length);
+    }
+  }
 
   const setAnswer = async (answer: string): Promise<void> => {
 
