@@ -9,14 +9,38 @@ Chrome's MediaRecorder on Linux uses a software H264 encoder that drops ~15% of 
 - [x] Phase 1: Research — MediaRecorder drops, WebCodecs blocked, werift ICE broken
 - [x] Phase 2: Architecture — @roamhq/wrtc native WebRTC bindings
 - [x] Phase 3: Implementation — monkey-patch, signaling, RTCVideoSink/AudioSink
-- [ ] Phase 4: Video quality — crop/resolution, frame rate, AV sync
-- [ ] Phase 5: Stability — ECONNRESET at 40s, long-running streams
-- [ ] Phase 6: Cleanup — squash commits, clean PR
+- [x] Phase 4: Video quality — resolution fixed, frame pacing broken (rawvideo path abandoned)
+- [ ] **Phase 5: H264 passthrough** — Encoded Transform API, `-c:v copy`, zero re-encode
+- [ ] Phase 6: Stability — ECONNRESET, long-running streams
+- [ ] Phase 7: Cleanup — squash commits, clean PR
 
 ## Current State
-**Branch:** `webrtc-capture` (based on `ffmpeg-fix-dropped-frames`)
 
-Video plays on TV with correct frame pacing. Audio + video both via WebRTC. Latest: added tabCapture video constraints (width/height/framerate) so Chrome delivers at the user's configured resolution instead of Xvfb screen size — eliminates need for center crop.
+### Two active branches:
+
+**`webrtc-capture`** (commit `c71705a`) — RTCVideoSink I420 rawvideo path. Works but has serious issues:
+- Frame pacing broken (stuttery every few seconds despite `-fps_mode cfr`, `-force_key_frames`, `-g 9999`)
+- Audio is white noise — SDP patching on Chrome's answer side added but untested (16kHz mono → should be 48kHz stereo)
+- High CPU — 186MB/s raw I420 through FFmpeg for re-encoding
+- ECONNRESET after ~40s (uncaught exception, stream dies)
+- Resolution and framing are correct (tabCapture constraints work)
+- Segments produce at real-time speed (wall-clock timestamps fixed the muxer stall)
+
+**`webrtc-h264-passthrough`** (commit `39548c3`) — NEW, Encoded Transform API. WIP:
+- Chrome's `createEncodedStreams()` intercepts H264 BEFORE RTP packetization
+- Must be called immediately after `addTrack()`, before `setParameters()` — fixed "Too late" error
+- H264 frames sent over WebSocket (0x03 prefix) to Node.js
+- FFmpeg uses `-c:v copy` (zero CPU for video, no re-encode)
+- Audio still via RTCAudioSink (PCM)
+- **UNTESTED** — pushed, CI passes, needs Docker build + test
+
+## Next Session: Start Here
+
+1. **Build and test `webrtc-h264-passthrough` branch in Docker**
+2. Check logs for: "H264 passthrough enabled" (means createEncodedStreams worked)
+3. If it works, verify video plays on TV — may need to debug H264 frame format (Annex B vs AVCC)
+4. If H264 data isn't Annex B, add start code injection (`00 00 00 01` before each NAL unit)
+5. If createEncodedStreams fails, try `RTCRtpScriptTransform` with inline Worker (Blob URL)
 
 ## Tasks
 
@@ -25,94 +49,85 @@ Video plays on TV with correct frame pacing. Audio + video both via WebRTC. Late
 - [x] Native WebRTC peer via @roamhq/wrtc (replaced broken werift)
 - [x] ICE candidate generation (40 candidates in Docker)
 - [x] SDP signaling: Node.js offers, Chrome answers
-- [x] Trickle ICE for candidates not in SDP
 - [x] RTCVideoSink — decoded I420 frames from Chrome
-- [x] RTCAudioSink — raw s16le PCM audio from Chrome
-- [x] FFmpeg dual-input: raw video fd3 + raw audio fd4
+- [x] RTCAudioSink — raw s16le PCM audio from Chrome (format detection: sampleRate, channelCount)
+- [x] FFmpeg dual-input: rawvideo fd3 + s16le fd4
 - [x] VA-API hardware encoding via system FFmpeg
-- [x] Center crop 2160x1440 → 1920x1080 (viewport)
-- [x] Output frame rate from user config
-- [x] Defer FFmpeg spawn until first frame dimensions known
+- [x] tabCapture video constraints (resolution + framerate from config)
+- [x] Defer FFmpeg spawn until first frame dimensions + audio format known
 - [x] Add audio track to Chrome's peer connection
-- [x] createRequire for ESM→CJS import of native module
-- [x] Remove werift dependency, clean up references
+- [x] Wall-clock timestamps for real-time segment production
+- [x] Segment log format fix (%.2f → .toFixed(2))
+- [x] H264 passthrough: createEncodedStreams() in monkey-patch (moved before setParameters)
+- [x] H264 passthrough: spawnH264PassthroughFFmpeg() with `-c:v copy`
+- [x] H264 passthrough: setup.ts routes 0x03 WebSocket data to FFmpeg video pipe
+- [x] H264 passthrough: falls back to rawvideo if Encoded Transform unavailable
 
-### To Do
-- [ ] Test latest build (tabCapture constraints + segment log fix)
-- [ ] Fix ECONNRESET after ~40s (stream dies, needs investigation)
-- [ ] Verify AV sync with WebRTC audio (both from same connection)
-- [ ] Verify frame rate now respects user's config (constraints added)
-- [ ] Remove MediaRecorder audio code from monkey-patch (no longer needed)
+### To Do (H264 passthrough branch)
+- [ ] Test H264 passthrough in Docker — does video play?
+- [ ] Debug H264 frame format (Annex B? AVCC? Need start codes?)
+- [ ] Debug puppeteer-stream WebSocket framing (messages delivered intact?)
+- [ ] Fix audio (SDP patching on answer side, or find alternative)
+- [ ] Test long-running stability (ECONNRESET still an issue?)
 - [ ] Gate WebRTC path (PRISMCAST_CONTAINER or feature flag?)
-- [ ] Test with different quality presets (720p, 480p, 4K)
 - [ ] Test channel switching / tab replacement
 - [ ] Squash commits for clean PR
-- [ ] Update memory file with final state
 
 ## Architecture
+
+### H264 Passthrough (new, preferred):
 ```
 Chrome extension (monkey-patch):
   tabCapture → RTCPeerConnection.addTrack(video + audio)
-  → Chrome encodes, sends RTP to Node.js
+  → createEncodedStreams() intercepts H264 BEFORE RTP
+  → H264 frames sent over WebSocket (0x03 prefix)
 
-Node.js (@roamhq/wrtc):
-  RTCPeerConnection receives RTP
-  → RTCVideoSink: decoded I420 frames → PassThrough stream
-  → RTCAudioSink: raw s16le PCM → PassThrough stream
-  → FFmpeg: rawvideo fd3 + s16le fd4 → center crop → h264_vaapi → fMP4
-  → Segmenter → HLS/MPEG-TS
+Node.js:
+  rawCaptureStream parses 0x03 prefix → H264 to FFmpeg fd3
+  RTCAudioSink: raw PCM → FFmpeg fd4
+  FFmpeg: -c:v copy + -c:a aac → fMP4
+  Segmenter → HLS/MPEG-TS
+```
 
-Fallback: standard MediaRecorder pipeline if WebRTC not available
+### Rawvideo fallback (working but broken pacing):
+```
+Chrome → RTP → @roamhq/wrtc RTCVideoSink (I420) → FFmpeg rawvideo → h264_vaapi → fMP4
 ```
 
 ## Key Files
-- `src/utils/webrtcCapture.ts` — native WebRTC peer, sinks, streams
-- `src/browser/index.ts` — monkey-patch (~line 830-970)
-- `src/streaming/setup.ts` — signaling + FFmpeg spawn (~line 487-600)
-- `src/utils/ffmpeg.ts` — spawnWebRTCFFmpeg with crop + VA-API (~line 375-450)
-- `Dockerfile` — system ffmpeg, @roamhq/wrtc (native, needs build tools)
+- `src/browser/index.ts` — monkey-patch with createEncodedStreams (~line 863-898)
+- `src/streaming/setup.ts` — H264 passthrough routing (~line 583-630), rawvideo fallback (~line 632+)
+- `src/utils/ffmpeg.ts` — spawnH264PassthroughFFmpeg (~line 563-684), spawnWebRTCFFmpeg (~line 375-550)
+- `src/utils/webrtcCapture.ts` — native WebRTC peer, RTCVideoSink/AudioSink, audio format detection
 
 ## Lore (Session Discoveries)
 
-### werift is broken in Docker
-werift's pure-TypeScript ICE implementation filters out Docker's network interfaces (veth ban list). Even with iceAdditionalHostAddresses, candidates appear in events but never in localDescription SDP. GitHub issues #400, #402 confirm bugs. Spent hours debugging — DON'T USE WERIFT.
+### createEncodedStreams() timing is critical
+Must call immediately after `addTrack()`, BEFORE `setParameters()` or `setRemoteDescription()`. Otherwise throws "Too late to create encoded streams". Chrome 86-149+ supports it (confirmed via caniuse).
 
-### @roamhq/wrtc works perfectly
-Native WebRTC M98 bindings. 40 ICE candidates generated instantly in Docker. Published 4 days ago, actively maintained. Uses createRequire for ESM compatibility.
+### RTCAudioSink delivers 16kHz mono by default
+Without SDP Opus parameters (`stereo=1;maxplaybackrate=48000`), Chrome negotiates narrowband mono. Patching the OFFER SDP doesn't work — must patch Chrome's ANSWER SDP (the answerer's local description controls encoding). SDP patch added to monkey-patch but untested.
 
-### RTCVideoSink frame structure
-`{ type: "frame", frame: { width, height, rotation, data } }` — NOT `{ data, width, height }`. The `data` is a Uint8Array of I420 pixels. Must use `Buffer.from(event.frame.data)`.
+### Wall-clock timestamps cause frame jitter
+`-use_wallclock_as_timestamps 1` on rawvideo input causes stuttery output because pipe I/O backpressure makes frame read timing irregular. Even with `-fps_mode cfr -r 60`, the jitter is visible. Switched to input `-r 60` for smooth PTS, with wall-clock on audio only.
 
-### RTCAudioSink frame structure
-`{ samples: Buffer }` — raw s16le PCM at 48kHz stereo.
+### h264_vaapi ignores -g, inserts extra keyframes
+Despite `-g 9999` and `-force_key_frames "expr:gte(t,n_forced*2)"`, h264_vaapi still inserts 1-second keyframes. Results in irregular segment sizes (mix of 2s and 4s segments).
 
-### Chrome captures at screen size, not viewport
-tabCapture gives 2160x1440 (Xvfb screen) even though viewport is 1920x1080. Must crop to viewport dimensions. Content position TBD — center crop assumed.
+### tabCapture constraints fix resolution
+Adding `videoConstraints.mandatory` with min/max width/height/frameRate to `chrome.tabCapture.capture()` makes Chrome deliver at the configured resolution (1920x1080) instead of Xvfb screen size (2160x1440). Eliminates need for center crop.
 
-### FFmpeg rawvideo input rate
-Do NOT set `-r` on input for rawvideo — it makes FFmpeg interpret frames at the wrong speed (2x if set to 60 but frames arrive at 30). Set `-r` on OUTPUT only. For dual-input (video+audio), use `-use_wallclock_as_timestamps 1` on BOTH inputs so video and audio PTS advance at real time. Without this, rawvideo defaults to 25fps PTS, racing 2.4x ahead of real-time audio, stalling the muxer and producing segments 3-6x slower than real time.
+### puppeteer-stream WebSocket passes data through raw
+`ws.on("message", (data) => stream.write(data))` — no prefix stripping, no parsing. Raw binary WebSocket messages go straight to the stream. Our 0x03 prefix for H264 will be in rawCaptureStream.
 
-### FFmpeg needs both inputs
-With dual-input (fd3 video + fd4 audio), FFmpeg won't produce ANY output until BOTH inputs have data. Missing audio track = no segments = stream timeout.
-
-### VA-API works for re-encode
-System FFmpeg (`/usr/bin/ffmpeg`) with h264_vaapi confirmed working. Filter chain: `crop=W:H:X:Y,format=nv12,hwupload` → h264_vaapi.
-
-### tabCapture needs video constraints
-Without `videoConstraints` in `chrome.tabCapture.capture()`, Chrome delivers video at the Xvfb screen resolution (e.g., 2160x1440) instead of the user's configured viewport (e.g., 1920x1080). The standard MediaRecorder path passes mandatory min/max width/height/frameRate constraints — the WebRTC monkey-patch must do the same.
-
-### ECONNRESET at 40s
-Stream consistently dies after ~40 seconds with "read ECONNRESET". Likely from the standard MediaRecorder pipeline's FFmpeg (VA-API path) failing in the fallback code, or puppeteer-stream's WebSocket closing.
-
-### Raw H264 interception (research)
-@roamhq/wrtc's RTCVideoSink only gives decoded I420 — no API for raw H264 or RTP. No Node.js WebRTC library exposes encoded frames. However, Chrome's **Encoded Transform API** (`RTCRtpSender.createEncodedStreams()` or `RTCRtpScriptTransform`) can intercept H264 frames on the browser side BEFORE RTP packetization. The monkey-patch runs in Chrome's extension context — could intercept encoded frames and send via WebSocket to Node.js, where FFmpeg does `-c:v copy` (no re-encode). Would solve CPU, pacing, and quality in one shot.
+### H264 frame format unknown
+RTCEncodedVideoFrame.data format from createEncodedStreams() is unconfirmed. Likely Annex B (start codes) since it's pre-packetizer, but could be AVCC (length-prefixed). FFmpeg `-f h264` expects Annex B. If wrong, need to inject `00 00 00 01` start codes.
 
 ## Failed Approaches
-1. **werift** — ICE broken in Docker, wasted many hours
+1. **werift** — ICE broken in Docker
 2. **WebCodecs VideoEncoder** — Chrome blocks hardware H264 on Linux
-3. **x11grab / gpu-screen-recorder** — External capture tools, integration nightmares
-4. **Xorg dummy driver** — Proper 60Hz but loses all GPU acceleration
-5. **trun normalization in segmenter** — Caused AV desync and slow playback
-6. **requestAnimationFrame pump** — Doubled frame duplications, stole CPU
-7. **100Mbps capture bitrate** — Didn't prevent MediaRecorder frame drops
-8. **Page.screencast()** — JPEG screenshots, unusable for live video
+3. **x11grab / gpu-screen-recorder** — integration nightmares
+4. **Wall-clock timestamps for rawvideo** — pipe I/O jitter causes visible stutter
+5. **SDP Opus patch on offer side** — doesn't change Chrome's encoder; must patch answer
+6. **-g flag for h264_vaapi GOP** — encoder ignores it, inserts extra keyframes
+7. **-fps_mode cfr with wall-clock** — doesn't smooth out the underlying jitter
