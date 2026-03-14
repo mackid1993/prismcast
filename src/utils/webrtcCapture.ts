@@ -10,8 +10,8 @@ import { DepacketizeCallback, H264RtpPayload } from "werift/nonstandard";
 import { RTCPeerConnection, useH264 } from "werift";
 import { LOG } from "./logger.js";
 import { PassThrough } from "node:stream";
-import { networkInterfaces } from "node:os";
 import type { Readable } from "node:stream";
+import { networkInterfaces } from "node:os";
 
 /**
  * Result from creating a WebRTC capture peer.
@@ -53,7 +53,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   // Get all IPv4 addresses from the container's network interfaces. werift's getHostAddresses() filters out Docker's veth interfaces, so we need to discover
   // addresses ourselves and pass them via iceAdditionalHostAddresses which bypasses werift's interface filtering.
-  const hostAddresses: string[] = [ "127.0.0.1" ];
+  const hostAddresses: string[] = ["127.0.0.1"];
   const ifaces = networkInterfaces();
 
   for(const name of Object.keys(ifaces)) {
@@ -145,7 +145,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
     LOG.info("%sWebRTC: video track received via pc.ontrack, kind=%s.", logPrefix, event?.track?.kind ?? "unknown");
 
-    if(event?.track?.kind === "video" && event.track.onReceiveRtp) {
+    if((event?.track?.kind === "video") && event.track.onReceiveRtp) {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       event.track.onReceiveRtp.subscribe((rtp: any) => {
@@ -185,7 +185,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
     if(candidate) {
 
       collectedCandidates.push(JSON.stringify(candidate));
-      LOG.info("%sWebRTC: ICE candidate gathered: %s", logPrefix, String(candidate.candidate).substring(0, 60));
+      LOG.info("%sWebRTC: ICE candidate gathered.", logPrefix);
     }
   });
 
@@ -220,7 +220,8 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
   const setAnswer = async (answer: string): Promise<void> => {
 
     // Log answer SDP media lines.
-    const answerLines = answer.split("\n").filter((l: string) => l.startsWith("m=") || l.startsWith("a=recvonly") || l.startsWith("a=sendonly") || l.startsWith("a=sendrecv") || l.startsWith("a=inactive") || l.startsWith("a=rtpmap") || l.startsWith("a=candidate"));
+    const sdpPrefixes = [ "m=", "a=recvonly", "a=sendonly", "a=sendrecv", "a=inactive", "a=rtpmap", "a=candidate" ];
+    const answerLines = answer.split("\n").filter((l: string) => sdpPrefixes.some((p) => l.startsWith(p)));
 
     LOG.info("%sWebRTC answer SDP: %s", logPrefix, answerLines.join(" | "));
 

@@ -522,10 +522,11 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
               LOG.info("Sending %d ICE candidates to Chrome via trickle ICE.", peer.candidates.length);
 
-              for(const candidate of peer.candidates) {
+              // Send all candidates in one evaluate call to avoid await-in-loop.
+              const candidateScript = peer.candidates.map((c) => "globalThis.WEBRTC_ADD_CANDIDATE(" + JSON.stringify(c) + ");"
+              ).join("\n");
 
-                await extensionPage.evaluate("globalThis.WEBRTC_ADD_CANDIDATE(" + JSON.stringify(candidate) + ")");
-              }
+              await extensionPage.evaluate(candidateScript);
             }
 
             webrtcPeer = peer;
