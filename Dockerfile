@@ -97,6 +97,8 @@ RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firm
     i965-va-driver \
     intel-media-va-driver \
     vainfo \
+    # System FFmpeg with VA-API support for hardware video re-encoding. The bundled ffmpeg-for-homebridge doesn't have VA-API compiled in.
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PrismCast. When BUILD_FROM_SOURCE is set (manual/dev builds), build from the repository source. Otherwise, install the published package from npm (release
