@@ -606,10 +606,11 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         // Audio flows immediately — MediaRecorder starts before WebRTC connects, but FFmpeg handles the
         // A/V offset via aresample=async. No buffering/dropping needed.
         //
-        // Each H264 frame is prepended with an Access Unit Delimiter (AUD) NAL. Without AUDs, FFmpeg's
-        // h264 parser can't distinguish frame boundaries when multiple frames arrive in the same pipe
-        // read — it merges them into giant access units, breaking timestamp assignment entirely.
-        const AUD_NAL = Buffer.from([ 0x00, 0x00, 0x00, 0x01, 0x09, 0xf0 ]);
+        // H264 frames are wrapped in MPEG-TS with proper PTS timestamps before reaching FFmpeg. Raw H264
+        // on a pipe doesn't work — FFmpeg's h264 demuxer can't reliably detect frame boundaries in
+        // streaming mode, producing 0.10s segments regardless of -framerate or AUD injection.
+        const { createMpegTsMuxer } = await import("../utils/mpegts.js");
+        const tsMuxer = createMpegTsMuxer(CONFIG.streaming.frameRate);
         let h264FrameCount = 0;
 
         rawCaptureStream.on("data", (data: Buffer) => {
@@ -617,10 +618,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           if((data.length > 2) && (data[0] === 0x03) && ffmpeg.videoPipe) {
 
             const h264Data = data.subarray(2);
+            const isKeyframe = data[1] === 1;
 
             if(h264FrameCount === 0) {
 
-              const isKeyframe = data[1] === 1;
               const firstBytes = Array.from(h264Data.subarray(0, Math.min(16, h264Data.length)))
                 .map((b) => b.toString(16).padStart(2, "0")).join(" ");
 
@@ -630,10 +631,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
             h264FrameCount++;
 
-            // Write AUD + frame data. AUD tells FFmpeg "new access unit starts here" so each
-            // Encoded Transform frame gets its own PTS from -framerate.
-            ffmpeg.videoPipe.write(AUD_NAL);
-            ffmpeg.videoPipe.write(h264Data);
+            // Wrap H264 frame in MPEG-TS with PTS = frameCount * 90000/fps (90kHz clock).
+            const tsPackets = tsMuxer.mux(h264Data, isKeyframe);
+
+            ffmpeg.videoPipe.write(tsPackets);
           } else if((data.length > 1) && (data[0] === 0x02) && ffmpeg.audioPipe) {
 
             // WebM/Opus audio from MediaRecorder. Flows continuously — FFmpeg probes the WebM header

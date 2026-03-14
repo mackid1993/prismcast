@@ -572,11 +572,10 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number, frameRate: numb
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: H264 from Chrome's Encoded Transform API. Each frame is prepended with an AUD NAL in
-    // setup.ts so FFmpeg's h264 parser can find access unit boundaries. -framerate assigns smooth,
-    // evenly-spaced PTS (1/fps per frame) — wall-clock timestamps don't work because pipe I/O is bursty.
-    "-framerate", String(frameRate),
-    "-f", "h264",
+    // Input 0: H264 wrapped in MPEG-TS from setup.ts. Raw H264 on a pipe doesn't work — FFmpeg's h264
+    // demuxer can't reliably detect frame boundaries or assign correct PTS in streaming mode. MPEG-TS
+    // carries proper PTS timestamps (90kHz clock) assigned by our muxer at exactly 1/fps per frame.
+    "-f", "mpegts",
     "-i", "pipe:3",
     // Input 1: WebM/Opus audio from Chrome's MediaRecorder (0x02 WebSocket data). Full quality 48kHz stereo —
     // bypasses RTCAudioSink which negotiates down to 16kHz mono via WebRTC. Probesize needed so FFmpeg can
