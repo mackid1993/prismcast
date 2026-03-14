@@ -275,11 +275,11 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
 
     if((now - lastProgressLog) >= 5000) {
 
-      const frame = progressStats.frame ?? "?";
-      const fps = progressStats.fps ?? "?";
-      const speed = progressStats.speed ?? "?";
-      const bitrate = progressStats.bitrate ?? "?";
-      const drop = progressStats.drop_frames ?? "0";
+      const frame = progressStats.frame || "?";
+      const fps = progressStats.fps || "?";
+      const speed = progressStats.speed || "?";
+      const bitrate = progressStats.bitrate || "?";
+      const drop = progressStats.drop_frames || "0";
 
       LOG.info("%sFFmpeg: frame=%s fps=%s speed=%s bitrate=%s dropped=%s", logPrefix, frame, fps, speed, bitrate, drop);
       lastProgressLog = now;
