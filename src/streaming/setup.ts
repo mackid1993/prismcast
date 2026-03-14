@@ -392,10 +392,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
         mandatory: {
 
-          maxFrameRate: 60,
+          maxFrameRate: CONFIG.streaming.frameRate,
           maxHeight: getEffectiveViewport(CONFIG).height,
           maxWidth: getEffectiveViewport(CONFIG).width,
-          minFrameRate: Math.max(30, Math.min(60, CONFIG.streaming.frameRate)),
+          minFrameRate: CONFIG.streaming.frameRate,
           minHeight: getEffectiveViewport(CONFIG).height,
           minWidth: getEffectiveViewport(CONFIG).width
         }
