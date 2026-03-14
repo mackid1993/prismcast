@@ -8,7 +8,6 @@ import { LOG, delay, extractDomain, formatError, registerAbortController, retryO
   spawnFFmpeg, spawnWebRTCFFmpeg, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
-import { getExtensionPage } from "puppeteer-stream";
 import { getNextStreamId, getStreamCount } from "./registry.js";
 import { getProfileForChannel, getProfileForUrl, getProfiles, resolveProfile } from "../config/profiles.js";
 import { initializePlayback, navigateToPage } from "../browser/video.js";
@@ -489,59 +488,34 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       // Video arrives via WebRTC RTP (depacketized by werift to Annex B H264). Audio arrives via WebSocket (0x02 prefix, WebM/Opus).
       // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
       let useWebRTC = false;
-      let webrtcPeer: import("../utils/webrtcCapture.js").WebRTCCapturePeer | undefined;
+      let webrtcPeer: Nullable<{ videoStream: Readable; createAnswer: (offer: string) => Promise<string>; close: () => void }> = null;
 
-      // Check if the WebRTC monkey-patch is active by polling for the SDP offer.
-      const extensionPage = await getExtensionPage(await getCurrentBrowser());
+      // Check if the WebRTC monkey-patch is active by waiting for the SDP offer.
+      const { getExtensionPage: getExtPage } = await import("puppeteer-stream");
+      const extensionPage = await getExtPage(await getCurrentBrowser());
 
       try {
 
-        // Wait up to 3 seconds for the WebRTC offer to appear.
-        for(let i = 0; i < 30; i++) {
+        await extensionPage.waitForFunction("globalThis.WEBRTC_READY === true", { timeout: 3000 });
+        const offer = await extensionPage.evaluate("globalThis.WEBRTC_OFFER") as string;
 
-          const ready = await extensionPage.evaluate("globalThis.WEBRTC_READY") as boolean;
+        if(offer) {
 
-          if(ready) {
+          LOG.info("WebRTC SDP offer received, creating werift peer...");
 
-            const offer = await extensionPage.evaluate("globalThis.WEBRTC_OFFER") as string;
+          const { createWebRTCCapturePeer } = await import("../utils/webrtcCapture.js");
 
-            if(offer) {
+          webrtcPeer = createWebRTCCapturePeer(streamId);
+          const answer = await webrtcPeer.createAnswer(offer);
 
-              LOG.info("WebRTC SDP offer received, creating werift peer...");
+          await extensionPage.evaluate("WEBRTC_SET_ANSWER(" + JSON.stringify(answer) + ")");
 
-              // Create werift peer and answer the offer.
-              const { createWebRTCCapturePeer } = await import("../utils/webrtcCapture.js");
-
-              webrtcPeer = createWebRTCCapturePeer(streamId);
-              const answer = await webrtcPeer.createAnswer(offer);
-
-              // Send answer back to Chrome.
-              await extensionPage.evaluate("WEBRTC_SET_ANSWER(" + JSON.stringify(answer) + ")");
-
-              // Exchange ICE candidates from Chrome → werift.
-              const iceCandidates = await extensionPage.evaluate("globalThis.WEBRTC_ICE_CANDIDATES") as string[];
-
-              if(iceCandidates) {
-
-                for(const candidate of iceCandidates) {
-
-                  // werift handles ICE internally via the SDP — candidates are usually in the offer for local connections.
-                  LOG.debug("streaming:webrtc", "ICE candidate from Chrome: %s", candidate.substring(0, 50));
-                }
-              }
-
-              useWebRTC = true;
-              LOG.info("WebRTC capture established.");
-
-              break;
-            }
-          }
-
-          await delay(100);
+          useWebRTC = true;
+          LOG.info("WebRTC capture established.");
         }
-      } catch(err) {
+      } catch {
 
-        LOG.warn("WebRTC signaling failed: %s. Falling back to MediaRecorder.", formatError(err));
+        LOG.info("WebRTC not available, using standard MediaRecorder.");
       }
 
       if(useWebRTC && webrtcPeer) {
@@ -556,7 +530,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           kill: (): void => {
 
             ffmpeg.kill();
-            webrtcPeer?.close();
+            webrtcPeer.close();
           }
         };
 

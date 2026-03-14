@@ -69,7 +69,8 @@
     "ffmpeg-for-homebridge": "2.2.1",
     "morgan": "1.10.1",
     "puppeteer-core": "24.37.5",
-    "puppeteer-stream": "3.0.21"
+    "puppeteer-stream": "3.0.21",
+    "werift": "^0.22.9"
   },
   "devDependencies": {
     "@stylistic/eslint-plugin": "5.9.0",

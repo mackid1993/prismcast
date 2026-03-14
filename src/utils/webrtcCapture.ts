@@ -7,9 +7,9 @@
 // @ts-expect-error — werift/nonstandard uses package.json exports which moduleResolution:"node" doesn't resolve.
 import { DepacketizeCallback, H264RtpPayload } from "werift/nonstandard";
 import { RTCPeerConnection, useH264 } from "werift";
-import type { Readable } from "node:stream";
-import { PassThrough } from "node:stream";
 import { LOG } from "./logger.js";
+import { PassThrough } from "node:stream";
+import type { Readable } from "node:stream";
 
 /**
  * Result from creating a WebRTC capture peer.
@@ -47,7 +47,7 @@ export function createWebRTCCapturePeer(streamId?: string): WebRTCCapturePeer {
     codecs: {
 
       audio: [],
-      video: [ useH264() ]
+      video: [useH264()]
     }
   });
 
@@ -70,7 +70,8 @@ export function createWebRTCCapturePeer(streamId?: string): WebRTCCapturePeer {
   });
 
   // Handle incoming video track from Chrome.
-  pc.ontrack = (event): void => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pc.ontrack = (event: any): void => {
 
     if(event.track.kind !== "video") {
 
@@ -80,7 +81,8 @@ export function createWebRTCCapturePeer(streamId?: string): WebRTCCapturePeer {
     LOG.info("%sWebRTC: video track received.", logPrefix);
 
     // Feed RTP packets to the depacketizer.
-    event.track.onReceiveRtp.subscribe((rtp) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    event.track.onReceiveRtp.subscribe((rtp: any) => {
 
       if(closed) {
 
@@ -116,7 +118,6 @@ export function createWebRTCCapturePeer(streamId?: string): WebRTCCapturePeer {
 
     LOG.info("%sWebRTC: SDP negotiation complete.", logPrefix);
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return pc.localDescription?.sdp ?? "";
   };
 

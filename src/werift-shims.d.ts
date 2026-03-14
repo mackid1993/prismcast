@@ -2,6 +2,8 @@
 declare module "multicast-dns" {
   namespace mdns {
     interface MulticastDNS {
+
+
       query: (...args: unknown[]) => void;
       on: (event: string, handler: (...args: unknown[]) => void) => void;
       destroy: () => void;
@@ -13,6 +15,8 @@ declare module "multicast-dns" {
 
 declare module "werift-rtp/src/rtcp/rtpfb/nack" {
   export class GenericNack {
+
+
     lost: number[];
     mediaSSRC: number;
     senderSSRC: number;

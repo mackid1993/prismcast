@@ -839,10 +839,14 @@ async function launchBrowser(): Promise<Browser> {
       //
       // Signaling: The extension stores the SDP offer in globalThis.WEBRTC_OFFER and ICE candidates in globalThis.WEBRTC_ICE_CANDIDATES.
       // Node.js reads them via page.evaluate() and sends the answer back via page.evaluate("WEBRTC_SET_ANSWER(...)").
-      // eslint-disable-next-line no-restricted-syntax
+      const patchBitrate = String(CONFIG.streaming.videoBitsPerSecond);
+      const patchFrameRate = String(CONFIG.streaming.frameRate);
+
+      /* eslint-disable no-restricted-syntax */
       const webrtcPatch = `(function() {
-        var PRISMCAST_BITRATE = ` + String(CONFIG.streaming.videoBitsPerSecond) + `;
-        var PRISMCAST_FRAMERATE = ` + String(CONFIG.streaming.frameRate) + `;
+        var PRISMCAST_BITRATE = ` + patchBitrate + `;
+        var PRISMCAST_FRAMERATE = ` + patchFrameRate + `;
+        var origStopRecording = globalThis.STOP_RECORDING;
         var origStopRecording = globalThis.STOP_RECORDING;
         var activeCaptures = new Map();
 
@@ -972,6 +976,7 @@ async function launchBrowser(): Promise<Browser> {
         };
       })()`;
 
+      /* eslint-enable no-restricted-syntax */
       await extensionPage.evaluate(webrtcPatch);
       LOG.info("WebRTC capture monkey-patch installed.");
     } catch {
