@@ -10,6 +10,7 @@ import { DepacketizeCallback, H264RtpPayload } from "werift/nonstandard";
 import { RTCPeerConnection, useH264 } from "werift";
 import { LOG } from "./logger.js";
 import { PassThrough } from "node:stream";
+import { networkInterfaces } from "node:os";
 import type { Readable } from "node:stream";
 
 /**
@@ -46,6 +47,24 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
   const videoOutput = new PassThrough();
   let closed = false;
 
+  // Get all IPv4 addresses from the container's network interfaces. werift's getHostAddresses() filters out Docker's veth interfaces, so we need to discover
+  // addresses ourselves and pass them via iceAdditionalHostAddresses which bypasses werift's interface filtering.
+  const hostAddresses: string[] = [ "127.0.0.1" ];
+  const ifaces = networkInterfaces();
+
+  for(const name of Object.keys(ifaces)) {
+
+    for(const iface of ifaces[name] ?? []) {
+
+      if((iface.family === "IPv4") && !iface.internal) {
+
+        hostAddresses.push(iface.address);
+      }
+    }
+  }
+
+  LOG.info("%sWebRTC: discovered host addresses: %s", logPrefix, hostAddresses.join(", "));
+
   const pc = new RTCPeerConnection({
 
     codecs: {
@@ -53,9 +72,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
       audio: [],
       video: [useH264()]
     },
-    iceAdditionalHostAddresses: [ "0.0.0.0", "127.0.0.1" ],
-    iceInterfaceAddresses: { udp4: "0.0.0.0" },
-    icePortRange: [ 10000, 10100 ],
+    iceAdditionalHostAddresses: hostAddresses,
     iceUseIpv4: true,
     iceUseIpv6: false
   });
@@ -155,21 +172,76 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   pliInterval.unref();
 
-  // Create the offer and wait for ICE gathering to complete. The offer must include werift's ICE candidates so Chrome knows where to send RTP.
-  await pc.setLocalDescription(await pc.createOffer());
+  // Collect ICE candidates via events. werift's localDescription may not include candidates in Docker because the veth filter leaves no interfaces for the
+  // standard gathering path. iceAdditionalHostAddresses bypasses the filter but candidates arrive asynchronously via onIceCandidate events.
+  const collectedCandidates: string[] = [];
 
-  // Wait for ICE gathering. Log the state to debug why candidates aren't appearing.
-  LOG.info("%sWebRTC: ICE gathering state after setLocalDescription: %s", logPrefix, pc.iceGatheringState);
+  pc.onIceCandidate.subscribe((candidate) => {
 
-  // Force a 2 second wait regardless of state — werift might report "complete" before actually gathering.
-  await new Promise<void>((resolve) => {
+    if(candidate) {
 
-    setTimeout(resolve, 2000);
+      // Format as SDP candidate line.
+      const line = "a=" + candidate.candidate;
+
+      collectedCandidates.push(line);
+      LOG.info("%sWebRTC: ICE candidate gathered: %s", logPrefix, candidate.candidate.substring(0, 60));
+    }
   });
 
-  LOG.info("%sWebRTC: ICE gathering state after 2s wait: %s", logPrefix, pc.iceGatheringState);
+  // Create the offer.
+  await pc.setLocalDescription(await pc.createOffer());
 
-  const offerSdp = pc.localDescription?.sdp ?? "";
+  LOG.info("%sWebRTC: ICE gathering state: %s", logPrefix, pc.iceGatheringState);
+
+  // Wait for ICE gathering to complete — candidates arrive async.
+  await new Promise<void>((resolve) => {
+
+    if(pc.iceGatheringState === "complete") {
+
+      resolve();
+
+      return;
+    }
+
+    pc.iceGatheringStateChange.subscribe((state) => {
+
+      if(state === "complete") {
+
+        resolve();
+      }
+    });
+
+    setTimeout(resolve, 5000);
+  });
+
+  LOG.info("%sWebRTC: gathered %d ICE candidates.", logPrefix, collectedCandidates.length);
+
+  // Build the offer SDP. If localDescription already has candidates (macOS), use it as-is. Otherwise, manually inject the collected candidates.
+  let offerSdp = pc.localDescription?.sdp ?? "";
+
+  if(!offerSdp.includes("a=candidate") && (collectedCandidates.length > 0)) {
+
+    // Inject candidates before the first m= line's attributes end (before the next m= or end of SDP).
+    const lines = offerSdp.split("\r\n");
+    const injected: string[] = [];
+
+    for(const line of lines) {
+
+      injected.push(line);
+
+      // Add candidates after the media line attributes.
+      if(line.startsWith("a=rtpmap")) {
+
+        for(const candidate of collectedCandidates) {
+
+          injected.push(candidate);
+        }
+      }
+    }
+
+    offerSdp = injected.join("\r\n");
+    LOG.info("%sWebRTC: injected %d candidates into offer SDP.", logPrefix, collectedCandidates.length);
+  }
 
   // Log the offer SDP media lines for debugging.
   const offerLines = offerSdp.split("\n").filter((l: string) => l.startsWith("m=") || l.startsWith("a=recvonly") || l.startsWith("a=sendonly") || l.startsWith("a=sendrecv") || l.startsWith("a=inactive") || l.startsWith("a=rtpmap"));
