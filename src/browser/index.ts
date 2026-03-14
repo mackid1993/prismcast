@@ -895,10 +895,24 @@ async function launchBrowser(): Promise<Browser> {
           // Intercept encoded video frames using a TransformStream that copies each frame to the WebSocket while passing it through
           // to the receiver. The receiver MUST get the frames so it sends RTCP feedback — without feedback, the encoder stays at minimum quality.
           var senderStreams = videoSender.createEncodedStreams();
+          var diagCount = 0;
           var transformer = new TransformStream({
             transform: function(frame, controller) {
               try {
                 var data = new Uint8Array(frame.data);
+
+                // Log first 16 bytes of first 5 frames to diagnose H264 format.
+                if (diagCount < 5) {
+                  var hex = Array.from(data.slice(0, 16)).map(function(b) { return b.toString(16).padStart(2, "0"); }).join(" ");
+                  var diagMsg = "frame " + diagCount + ": type=" + frame.type + " size=" + data.length + " hex=" + hex;
+                  var diagBuf = new TextEncoder().encode("DIAG:" + diagMsg);
+                  var diagPkt = new Uint8Array(1 + diagBuf.length);
+                  diagPkt[0] = 0xFF;
+                  diagPkt.set(diagBuf, 1);
+                  if (ws.readyState === WebSocket.OPEN) ws.send(diagPkt.buffer);
+                  diagCount++;
+                }
+
                 var msg = new Uint8Array(1 + data.length);
                 msg[0] = 0x01;
                 msg.set(data, 1);

@@ -557,6 +557,9 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
             audioBytes += payload.length;
             audioChunks++;
             webrtcFFmpeg.audioPipe.write(payload);
+          } else if(type === 0xFF) {
+
+            LOG.info("%sWebRTC: %s", streamId ? "[" + streamId + "] " : "", payload.toString("utf8"));
           }
         } else {
 
