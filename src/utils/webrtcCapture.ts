@@ -18,8 +18,11 @@ const wrtc: any = createRequire(import.meta.url)("@roamhq/wrtc");
  */
 export interface WebRTCCapturePeer {
 
-  // Collected ICE candidates as JSON strings for trickle ICE (unused with native — SDP includes them).
+  // Collected ICE candidates (unused with native — SDP includes them).
   candidates: string[];
+
+  // Promise that resolves with the first frame's dimensions.
+  firstFrameDimensions: Promise<{ height: number; width: number }>;
 
   // The SDP offer to send to Chrome.
   offer: string;
@@ -27,7 +30,7 @@ export interface WebRTCCapturePeer {
   // Set Chrome's SDP answer.
   setAnswer: (answer: string) => Promise<void>;
 
-  // Readable stream of raw H264 Annex B NALUs.
+  // Readable stream of raw I420 video frames.
   videoStream: Readable;
 
   // Gracefully close the peer connection.
@@ -53,6 +56,13 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   // Add a recvonly transceiver to request video from Chrome.
   pc.addTransceiver("video", { direction: "recvonly" });
+
+  // Promise for the first frame's dimensions — setup.ts waits for this before spawning FFmpeg.
+  let resolveDimensions: (dims: { height: number; width: number }) => void;
+  const firstFrameDimensions = new Promise<{ height: number; width: number }>((resolve) => {
+
+    resolveDimensions = resolve;
+  });
 
   // When Chrome's video track arrives, use RTCVideoSink to get raw frames, or just monitor the connection.
   // For now, we'll extract H264 from the RTP stream via the nonstandard API.
@@ -83,6 +93,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
           firstFrame = false;
           LOG.info("%sWebRTC: first frame %dx%d, %d bytes (I420).",
             logPrefix, evt.frame.width, evt.frame.height, evt.frame.data.length);
+          resolveDimensions({ height: evt.frame.height, width: evt.frame.width });
         }
 
         frameCount++;
@@ -174,6 +185,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
     candidates: [],
     close,
+    firstFrameDimensions,
     offer: offerSdp,
     setAnswer,
     videoStream: videoOutput

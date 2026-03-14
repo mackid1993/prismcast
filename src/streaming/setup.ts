@@ -488,7 +488,14 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       // Video arrives via WebRTC RTP (depacketized by werift to Annex B H264). Audio arrives via WebSocket (0x02 prefix, WebM/Opus).
       // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
       let useWebRTC = false;
-      let webrtcPeer: Nullable<{ candidates: string[]; offer: string; setAnswer: (answer: string) => Promise<void>; videoStream: Readable; close: () => void }> = null;
+      let webrtcPeer: Nullable<{
+        candidates: string[];
+        firstFrameDimensions: Promise<{ height: number; width: number }>;
+        offer: string;
+        setAnswer: (answer: string) => Promise<void>;
+        videoStream: Readable;
+        close: () => void;
+      }> = null;
 
       // Check if the WebRTC monkey-patch is active, then do signaling: werift offers, Chrome answers.
       const { getExtensionPage: getExtPage } = await import("puppeteer-stream");
@@ -551,10 +558,13 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
       if(useWebRTC && webrtcPeer) {
 
-        // WebRTC mode: video from werift, audio from WebSocket.
-        const viewport = getEffectiveViewport(CONFIG);
+        // WebRTC mode: wait for first frame to get actual dimensions, then spawn FFmpeg.
+        LOG.info("WebRTC: waiting for first frame dimensions...");
+        const dims = await webrtcPeer.firstFrameDimensions;
+
+        LOG.info("WebRTC: spawning FFmpeg for %dx%d.", dims.width, dims.height);
         const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
-          CONFIG.streaming.frameRate, viewport.width, viewport.height, ffmpegError, streamId, comment);
+          CONFIG.streaming.frameRate, dims.width, dims.height, ffmpegError, streamId, comment);
 
         ffmpegProcess = {
 
