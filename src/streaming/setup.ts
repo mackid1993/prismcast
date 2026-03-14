@@ -584,12 +584,12 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
         // H264 passthrough mode: Chrome's Encoded Transform API intercepts H264 frames before RTP packetization
         // and sends them over WebSocket (0x03 prefix). FFmpeg copies the video through unchanged — zero CPU for video.
-        LOG.info("WebRTC: H264 passthrough mode — waiting for audio format...");
-        const audioFmt = await webrtcPeer.audioFormat;
+        // Audio comes from MediaRecorder (WebM/Opus over WebSocket, 0x02 prefix) at full tab quality (48kHz stereo),
+        // bypassing RTCAudioSink which negotiates down to 16kHz mono.
+        LOG.info("WebRTC: H264 passthrough mode.");
 
         const { spawnH264PassthroughFFmpeg } = await import("../utils/ffmpeg.js");
         const ffmpeg = spawnH264PassthroughFFmpeg(CONFIG.streaming.audioBitsPerSecond,
-          audioFmt.sampleRate, audioFmt.channelCount,
           ffmpegError, streamId, comment);
 
         ffmpegProcess = {
@@ -602,25 +602,20 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           }
         };
 
-        // Parse the rawCaptureStream for H264 frames (0x03 prefix). puppeteer-stream writes raw WebSocket
-        // messages to the stream — each message starts with a prefix byte identifying the data type.
-        if(ffmpeg.videoPipe) {
+        // Parse the rawCaptureStream for H264 video (0x03) and WebM/Opus audio (0x02).
+        // puppeteer-stream writes raw WebSocket messages to the stream — prefix byte identifies the data type.
+        rawCaptureStream.on("data", (data: Buffer) => {
 
-          rawCaptureStream.on("data", (data: Buffer) => {
+          if(data.length > 2 && data[0] === 0x03 && ffmpeg.videoPipe) {
 
-            if((data.length > 2) && (data[0] === 0x03) && ffmpeg.videoPipe) {
+            // H264 encoded frame from Encoded Transform. Byte 1 = keyframe flag, rest is H264 data.
+            ffmpeg.videoPipe.write(data.subarray(2));
+          } else if(data.length > 1 && data[0] === 0x02 && ffmpeg.audioPipe) {
 
-              // 0x03 prefix = H264 encoded frame from Encoded Transform. Byte 1 = keyframe flag, rest is H264 data.
-              ffmpeg.videoPipe.write(data.subarray(2));
-            }
-          });
-        }
-
-        // Audio still via RTCAudioSink (decoded PCM) — same as rawvideo path.
-        if(ffmpeg.audioPipe) {
-
-          webrtcPeer.audioStream.pipe(ffmpeg.audioPipe);
-        }
+            // WebM/Opus audio chunk from MediaRecorder. Strip prefix, pipe to FFmpeg.
+            ffmpeg.audioPipe.write(data.subarray(1));
+          }
+        });
 
         ffmpeg.stdout.on("error", (error) => {
 

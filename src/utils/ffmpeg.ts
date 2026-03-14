@@ -561,7 +561,6 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
  * @returns FFmpeg process with videoPipe (fd 3), audioPipe (fd 4), stdout for fMP4 output.
  */
 export function spawnH264PassthroughFFmpeg(audioBitrate: number,
-  audioSampleRate: number, audioChannels: number,
   onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
   const ffmpegPath = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
@@ -571,24 +570,22 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number,
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: H264 from Chrome's Encoded Transform API. Chrome's encoder provides correct PTS and keyframes
-    // at the configured segment interval (via generateKeyFrame()). No timestamp override needed.
+    // Input 0: H264 from Chrome's Encoded Transform API. Wall-clock timestamps required because raw H264 has
+    // no container timestamps — without this, FFmpeg assigns wrong PTS (40-60s media per 2s wall time).
+    "-use_wallclock_as_timestamps", "1",
     "-f", "h264",
     "-i", "pipe:3",
-    // Input 1: raw s16le PCM audio from RTCAudioSink.
-    "-use_wallclock_as_timestamps", "1",
-    "-f", "s16le",
-    "-ar", String(audioSampleRate),
-    "-ac", String(audioChannels),
+    // Input 1: WebM/Opus audio from Chrome's MediaRecorder (0x02 WebSocket data). Full quality 48kHz stereo —
+    // bypasses RTCAudioSink which negotiates down to 16kHz mono via WebRTC. WebM container has its own timestamps.
+    "-f", "webm",
     "-i", "pipe:4",
     "-map", "0:v",
     "-map", "1:a",
     // Video: copy through unchanged. Zero CPU.
     "-c:v", "copy",
-    // Audio: transcode PCM to AAC.
+    // Audio: transcode Opus to AAC.
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
-    "-af", "aresample=async=1000:first_pts=0",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-flush_packets", "1",
