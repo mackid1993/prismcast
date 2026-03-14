@@ -852,7 +852,7 @@ async function launchBrowser(): Promise<Browser> {
           var captureStream = await new Promise(function(resolve, reject) {
             var constraints = {
               audio: !!opts.audio,
-              video: videoConstraints ? { mandatory: videoConstraints.mandatory } : true
+              video: true
             };
             chrome.tabCapture.capture(constraints, function(stream) {
               if (!stream || chrome.runtime.lastError) {
