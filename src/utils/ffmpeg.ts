@@ -155,17 +155,23 @@ export async function resolveFFmpegPath(): Promise<string | undefined> {
  */
 export interface FFmpegProcess {
 
+  // Writable stream for piping audio (WebM/Opus) to FFmpeg. Only present when using WebCodecs dual-input mode.
+  audioPipe?: Writable;
+
   // Function to gracefully terminate the FFmpeg process.
   kill: () => void;
 
   // The underlying child process for lifecycle tracking.
   process: ChildProcess;
 
-  // Writable stream for piping WebM input to FFmpeg.
+  // Writable stream for piping input to FFmpeg. In legacy mode, receives the full WebM stream. In WebCodecs mode, unused (use videoPipe/audioPipe instead).
   stdin: Writable;
 
   // Readable stream for receiving fMP4 output from FFmpeg.
   stdout: Readable;
+
+  // Writable stream for piping video (raw H264 Annex B) to FFmpeg. Only present when using WebCodecs dual-input mode.
+  videoPipe?: Writable;
 }
 
 /**
@@ -330,6 +336,159 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
     process: ffmpeg,
     stdin: ffmpeg.stdin,
     stdout: ffmpeg.stdout
+  };
+}
+
+/**
+ * Spawns an FFmpeg process configured for WebCodecs dual-input mode. Accepts raw H264 Annex B video on fd 3 and audio-only WebM/Opus on fd 4. Video is passed
+ * through unchanged; audio is transcoded from Opus to AAC. This replaces the single-input WebM remux path when WebCodecs VideoEncoder is used for capture.
+ * @param audioBitrate - Audio bitrate in bits per second (e.g., 256000 for 256 kbps).
+ * @param onError - Callback invoked when FFmpeg exits unexpectedly or encounters an error.
+ * @param streamId - Stream identifier for logging.
+ * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
+ * @returns FFmpeg process wrapper with videoPipe (fd 3), audioPipe (fd 4), stdout, and kill function.
+ */
+export function spawnWebCodecsFFmpeg(audioBitrate: number, frameRate: number, onError: (error: Error) => void,
+  streamId?: string, comment?: string): FFmpegProcess {
+
+  const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
+  const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
+
+  const ffmpegArgs = [
+    "-hide_banner",
+    "-loglevel", "info",
+    "-progress", "pipe:2",
+    // Raw H264 Annex B has no timestamps — set the input frame rate so FFmpeg generates them.
+    "-framerate", String(frameRate),
+    "-f", "h264",
+    "-i", "pipe:3",
+    "-f", "webm",
+    "-i", "pipe:4",
+    "-map", "0:v",
+    "-map", "1:a",
+    "-c:v", "copy",
+    "-c:a", aacEncoder,
+    "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1",
+    "-f", "mp4",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-flush_packets", "1",
+    "-max_muxing_queue_size", "1024"
+  ];
+
+  if(comment) {
+
+    ffmpegArgs.push("-metadata", "comment=PrismCast - " + comment);
+  }
+
+  ffmpegArgs.push("pipe:1");
+
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+
+    stdio: [ "ignore", "pipe", "pipe", "pipe", "pipe" ]
+  });
+
+  const logPrefix = streamId ? "[" + streamId + "] " : "";
+  let shuttingDown = false;
+  let lastProgressLog = Date.now();
+  const progressStats: Record<string, string> = {};
+
+  // stderr is guaranteed non-null since stdio[2] is "pipe".
+  ffmpeg.stderr!.on("data", (data: Buffer) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    const message = data.toString().trim();
+
+    for(const line of message.split("\n")) {
+
+      const eqIdx = line.indexOf("=");
+
+      if(eqIdx > 0) {
+
+        progressStats[line.substring(0, eqIdx).trim()] = line.substring(eqIdx + 1).trim();
+      }
+    }
+
+    const now = Date.now();
+
+    if((now - lastProgressLog) >= 5000) {
+
+      const frame = progressStats.frame || "?";
+      const fps = progressStats.fps || "?";
+      const speed = progressStats.speed || "?";
+      const bitrate = progressStats.bitrate || "?";
+      const drop = progressStats.drop_frames || "0";
+
+      LOG.info("%sFFmpeg: frame=%s fps=%s speed=%s bitrate=%s dropped=%s", logPrefix, frame, fps, speed, bitrate, drop);
+      lastProgressLog = now;
+    }
+
+    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+
+    for(const line of message.split("\n")) {
+
+      const trimmed = line.trim();
+
+      if((trimmed.length === 0) || trimmed.includes("=") || noisePatterns.some((p) => trimmed.includes(p))) {
+
+        continue;
+      }
+
+      LOG.debug("streaming:ffmpeg", "%sFFmpeg: %s", logPrefix, trimmed);
+    }
+  });
+
+  ffmpeg.on("exit", (code, signal) => {
+
+    if(shuttingDown || (signal === "SIGTERM")) {
+
+      return;
+    }
+
+    if((code !== null) && (code !== 0)) {
+
+      onError(new Error("FFmpeg exited with code " + String(code) + "."));
+    } else if(signal) {
+
+      onError(new Error("FFmpeg killed by signal " + signal + "."));
+    }
+  });
+
+  ffmpeg.on("error", (error) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    onError(error);
+  });
+
+  const kill = (): void => {
+
+    shuttingDown = true;
+
+    if(!ffmpeg.killed) {
+
+      ffmpeg.kill("SIGTERM");
+    }
+  };
+
+  const videoPipe = ffmpeg.stdio[3] as Writable;
+  const audioPipe = ffmpeg.stdio[4] as Writable;
+
+  return {
+
+    audioPipe,
+    kill,
+    process: ffmpeg,
+    stdin: ffmpeg.stdin as unknown as Writable,
+    stdout: ffmpeg.stdout!,
+    videoPipe
   };
 }
 

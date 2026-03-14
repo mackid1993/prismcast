@@ -4,7 +4,8 @@
  */
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
-import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext, spawnFFmpeg, startTimer } from "../utils/index.js";
+import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext,
+  spawnWebCodecsFFmpeg, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
 import { getNextStreamId, getStreamCount } from "./registry.js";
@@ -19,7 +20,6 @@ import { getEffectiveViewport } from "../config/presets.js";
 import { getProviderDisplayName } from "../config/providers.js";
 import { isChannelSelectionProfile } from "../types/index.js";
 import { monitorPlaybackHealth } from "./monitor.js";
-import { pipeline } from "node:stream/promises";
 import { resizeAndMinimizeWindow } from "../browser/cdp.js";
 
 /* This module contains the common stream setup logic for HLS streaming. The core logic is split into two functions:
@@ -392,10 +392,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
         mandatory: {
 
-          maxFrameRate: 60,
+          maxFrameRate: CONFIG.streaming.frameRate,
           maxHeight: getEffectiveViewport(CONFIG).height,
           maxWidth: getEffectiveViewport(CONFIG).width,
-          minFrameRate: Math.max(30, Math.min(60, CONFIG.streaming.frameRate)),
+          minFrameRate: CONFIG.streaming.frameRate,
           minHeight: getEffectiveViewport(CONFIG).height,
           minWidth: getEffectiveViewport(CONFIG).width
         }
@@ -473,7 +473,9 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
-      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, (error) => {
+      // Use WebCodecs dual-input mode: the capture stream carries type-prefixed messages (0x01=video H264, 0x02=audio WebM/Opus). FFmpeg accepts video on fd 3 and
+      // audio on fd 4, copies video through and transcodes audio from Opus to AAC.
+      const ffmpeg = spawnWebCodecsFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
 
         LOG.error("FFmpeg process error: %s.", formatError(error));
 
@@ -485,7 +487,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
       ffmpegProcess = ffmpeg;
 
-      // Handle pipe errors on stdout. Stdin errors are handled by pipeline() below.
+      // Handle pipe errors on stdout.
       ffmpeg.stdout.on("error", (error) => {
 
         const errorMessage = formatError(error);
@@ -505,54 +507,82 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         }
       });
 
-      // Diagnostic logging for capture stream health. Logs bytes/sec and chunks/sec from puppeteer-stream every 5 seconds to identify capture-side delivery issues.
-      let captureBytes = 0;
-      let captureChunks = 0;
+      // Diagnostic logging for capture stream health.
+      let videoBytes = 0;
+      let videoChunks = 0;
+      let audioBytes = 0;
+      let audioChunks = 0;
       const captureLogInterval = setInterval(() => {
 
-        if(captureBytes > 0) {
+        if((videoBytes > 0) || (audioBytes > 0)) {
 
-          const kbps = Math.round((captureBytes * 8) / 5000);
+          const videoKbps = Math.round((videoBytes * 8) / 5000);
+          const audioKbps = Math.round((audioBytes * 8) / 5000);
 
-          LOG.info("%sCapture: %d kbps, %d chunks/5s (avg %d bytes/chunk).",
-            streamId ? "[" + streamId + "] " : "", kbps, captureChunks, captureChunks > 0 ? Math.round(captureBytes / captureChunks) : 0);
-          captureBytes = 0;
-          captureChunks = 0;
+          LOG.info("%sCapture: video %d kbps (%d chunks), audio %d kbps (%d chunks).",
+            streamId ? "[" + streamId + "] " : "", videoKbps, videoChunks, audioKbps, audioChunks);
+          videoBytes = 0;
+          videoChunks = 0;
+          audioBytes = 0;
+          audioChunks = 0;
         }
       }, 5000);
 
       captureLogInterval.unref();
 
+      // Demux the type-prefixed capture stream into separate video and audio pipes for FFmpeg.
       rawCaptureStream.on("data", (chunk: Buffer) => {
 
-        captureBytes += chunk.length;
-        captureChunks++;
+        if(chunk.length < 2) {
+
+          return;
+        }
+
+        const type = chunk[0];
+        const payload = chunk.subarray(1);
+
+        if(type === 0x01) {
+
+          // Video: raw H264 Annex B from WebCodecs VideoEncoder.
+          videoBytes += payload.length;
+          videoChunks++;
+
+          if(ffmpeg.videoPipe) {
+
+            ffmpeg.videoPipe.write(payload);
+          }
+        } else if(type === 0x02) {
+
+          // Audio: WebM/Opus from MediaRecorder (audio-only).
+          audioBytes += payload.length;
+          audioChunks++;
+
+          if(ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.write(payload);
+          }
+        } else if(type === 0xFF) {
+
+          // Diagnostic messages from the WebCodecs extension patch.
+          const diagMsg = payload.toString("utf8");
+
+          LOG.info("%sWebCodecs: %s", streamId ? "[" + streamId + "] " : "", diagMsg);
+        }
       });
 
       rawCaptureStream.on("close", () => {
 
         clearInterval(captureLogInterval);
-      });
 
-      // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup. When FFmpeg is killed during tab replacement, pipeline() automatically
-      // destroys the source stream, preventing "write after end" errors that would occur with .pipe().
-      pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+        // Close the video and audio pipes to signal EOF to FFmpeg.
+        if(ffmpeg.videoPipe) {
 
-        const errorMessage = formatError(error);
-
-        // EPIPE, "write after end", and "Premature close" errors are expected during cleanup when FFmpeg is killed or the capture stream is destroyed.
-        if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
-
-          return;
+          ffmpeg.videoPipe.end();
         }
 
-        // Unexpected pipeline errors require cleanup.
-        LOG.error("Capture pipeline error: %s.", errorMessage);
-        ffmpeg.kill();
+        if(ffmpeg.audioPipe) {
 
-        if(onFFmpegError) {
-
-          onFFmpegError(error instanceof Error ? error : new Error(String(error)));
+          ffmpeg.audioPipe.end();
         }
       });
 
