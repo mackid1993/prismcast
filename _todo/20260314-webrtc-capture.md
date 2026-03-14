@@ -104,6 +104,9 @@ Without `videoConstraints` in `chrome.tabCapture.capture()`, Chrome delivers vid
 ### ECONNRESET at 40s
 Stream consistently dies after ~40 seconds with "read ECONNRESET". Likely from the standard MediaRecorder pipeline's FFmpeg (VA-API path) failing in the fallback code, or puppeteer-stream's WebSocket closing.
 
+### Raw H264 interception (research)
+@roamhq/wrtc's RTCVideoSink only gives decoded I420 — no API for raw H264 or RTP. No Node.js WebRTC library exposes encoded frames. However, Chrome's **Encoded Transform API** (`RTCRtpSender.createEncodedStreams()` or `RTCRtpScriptTransform`) can intercept H264 frames on the browser side BEFORE RTP packetization. The monkey-patch runs in Chrome's extension context — could intercept encoded frames and send via WebSocket to Node.js, where FFmpeg does `-c:v copy` (no re-encode). Would solve CPU, pacing, and quality in one shot.
+
 ## Failed Approaches
 1. **werift** — ICE broken in Docker, wasted many hours
 2. **WebCodecs VideoEncoder** — Chrome blocks hardware H264 on Linux
