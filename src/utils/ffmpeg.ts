@@ -199,13 +199,13 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "warning",
-    "-f", "mpegts",
+    "-probesize", "16384",
     "-i", "pipe:0",
     "-c:v", "copy",
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
-    "-f", "mp4",
-    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-af", "aresample=async=1",
+    "-f", "mpegts",
     "-flush_packets", "1"
   ];
 

@@ -886,6 +886,7 @@ export async function initializeStream(options: InitializeStreamOptions): Promis
           storeKey: channelName
         },
         mpegTsClientCount: 0,
+        mpegTsStream: setup.captureStream,
         page: setup.page,
         profile: setup.profile,
         rawCaptureStream: setup.rawCaptureStream,
@@ -896,76 +897,22 @@ export async function initializeStream(options: InitializeStreamOptions): Promis
         url: setup.url
       });
 
-      // Check for resume data from a previous shutdown. If available, the segmenter will continue from the saved sequence numbers instead of starting at 0, preventing
-      // HLS sequence resets that cause Channels DVR to produce broken recording timelines.
-      const resumeData = consumeResumeData(channelName);
-
-      // Create the native fMP4 segmenter to parse the MP4/AAC stream into HLS segments.
-      const segmenter = createFMP4Segmenter({
-
-        ...(resumeData ? {
-
-          initialTrackTimestamps: resumeData.trackTimestamps,
-          pendingDiscontinuity: true,
-          previousInitSegment: resumeData.initSegment,
-          startingInitVersion: resumeData.initVersion,
-          startingSegmentIndex: resumeData.segmentIndex
-        } : {}),
-
-        onError: (error: Error) => {
-
-          // Skip error handling if termination was already initiated.
-          if(isTerminationInitiated(setup.numericStreamId)) {
-
-            return;
-          }
-
-          LOG.error("Segmenter error for %s: %s.", channelName, formatError(error));
-
-          terminateStream(setup.numericStreamId, channelName, "stream processing error");
-          void emitCurrentSystemStatus();
-        },
-
-        onStop: () => {
-
-          // Skip handling if termination was already initiated.
-          if(isTerminationInitiated(setup.numericStreamId)) {
-
-            return;
-          }
-
-          LOG.error("Segmenter stopped unexpectedly for %s.", channelName);
-
-          terminateStream(setup.numericStreamId, channelName, "stream ended unexpectedly");
-          void emitCurrentSystemStatus();
-        },
-
-        streamId: setup.numericStreamId
-      });
-
-      // Pipe the capture stream to the segmenter.
-      segmenter.pipe(setup.captureStream);
-
-      // Store the segmenter reference in the registry.
+      // FFmpeg outputs MPEG-TS directly — no segmenter needed. The MPEG-TS stream is stored in the registry
+      // and piped directly to clients via the MPEG-TS endpoint. No HLS, no fMP4, no segment buffering.
       const stream = getStream(setup.numericStreamId);
 
-      if(stream) {
+      if(!stream) {
 
-        stream.segmenter = segmenter;
-      } else {
-
-        // Stream was terminated during setup (rare race condition). Clean up the orphaned segmenter.
-        cleanupOrphanedSetup(segmenter);
+        void setup.cleanup();
 
         return null;
       }
 
-      const captureMode = CONFIG.streaming.captureMode === "ffmpeg" ? "FFmpeg" : "Native";
       const displayName = channel?.name ?? url;
 
       const tuneTime = ((Date.now() - setup.startTime.getTime()) / 1000).toFixed(1);
 
-      LOG.info("Streaming %s (%s, %s). Tuned in %ss%s.", displayName, setup.profileName, captureMode, tuneTime, setup.directTune ? " (direct)" : "");
+      LOG.info("Streaming %s (%s, MPEG-TS direct). Tuned in %ss%s.", displayName, setup.profileName, tuneTime, setup.directTune ? " (direct)" : "");
 
       // Mark channel health as successful. Only for predefined channels (channel is defined). Ad-hoc URL streams have no persistent channel identity. Provider
       // auth is conditionally skipped when the provider defines validateTune and the tuned channel does not prove paid access (e.g., Sling Freestream channels).

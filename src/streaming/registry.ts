@@ -101,6 +101,9 @@ export interface StreamRegistryEntry {
   // The resolved site profile used for this stream. Needed for tab replacement recovery to recreate the capture with the same profile.
   profile: ResolvedSiteProfile;
 
+  // FFmpeg's MPEG-TS output stream, piped directly to MPEG-TS clients. Null if not yet started.
+  mpegTsStream: Nullable<Readable>;
+
   // The raw capture stream from puppeteer-stream. In FFmpeg mode, this is the WebM stream piped to FFmpeg's stdin. In native mode, this is the same as the segmenter
   // input. Must be destroyed before closing the page to ensure chrome.tabCapture releases the capture and prevents "Cannot capture a tab with an active stream" errors
   // on subsequent stream requests.

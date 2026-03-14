@@ -3,15 +3,14 @@
  * mpegts.ts: MPEG-TS streaming handler for PrismCast.
  */
 import type { Channel, Nullable } from "../types/index.js";
-import { LOG, formatError, spawnMpegTsRemuxer } from "../utils/index.js";
+import { LOG, formatError } from "../utils/index.js";
 import type { Request, Response } from "express";
 import { awaitStreamReadySilent, initializeStream, sendValidationError, validateChannel } from "./hls.js";
 import { getStream, updateLastAccess } from "./registry.js";
 import { registerClient, unregisterClient } from "./clients.js";
-import { CONFIG } from "../config/index.js";
+// import { CONFIG } from "../config/index.js";
 import { StreamSetupError } from "./setup.js";
 import { getChannelStreamId } from "./lifecycle.js";
-import { waitForInitSegment } from "./hlsSegments.js";
 
 /* This module provides a continuous MPEG-TS byte stream from the same capture pipeline used for HLS. It is designed for HDHomeRun-compatible clients (such as Plex)
  * that expect raw MPEG-TS when tuning a channel. The existing capture → segmenter → HLS segments flow is unchanged. Each MPEG-TS client gets its own FFmpeg remuxer
@@ -63,7 +62,7 @@ export async function handleMpegTsStream(req: Request, res: Response): Promise<v
   // Fast path: a real stream already exists. No early flush needed — the stream data will flow quickly.
   if((existingStreamId !== undefined) && (existingStreamId !== -1)) {
 
-    await serveMpegTsStream(existingStreamId, channelName, req, res);
+    serveMpegTsStream(existingStreamId, channelName, req, res);
 
     return;
   }
@@ -154,44 +153,24 @@ export async function handleMpegTsStream(req: Request, res: Response): Promise<v
     }
   }
 
-  await serveMpegTsStream(streamId, channelName, req, res);
+  serveMpegTsStream(streamId, channelName, req, res);
 }
 
 // Internal Helpers.
 
 /**
- * Serves the MPEG-TS stream once a stream ID is available. Waits for the init segment, spawns the FFmpeg remuxer, and pipes the output to the response. This is the
- * shared implementation used by both the fast path (existing stream) and the flush path (new stream).
+ * Serves the MPEG-TS stream once a stream ID is available. Pipes FFmpeg's MPEG-TS output directly to the HTTP response — no segmenter, no remuxer, no HLS.
  *
  * @param streamId - The numeric stream ID.
  * @param channelName - The channel name for logging.
  * @param req - Express request object.
  * @param res - Express response object.
  */
-async function serveMpegTsStream(streamId: number, channelName: string, req: Request, res: Response): Promise<void> {
+function serveMpegTsStream(streamId: number, channelName: string, req: Request, res: Response): void {
 
-  // Wait for the init segment to be available. The init segment contains codec configuration (ftyp+moov boxes) that FFmpeg needs before it can process media segments.
-  const initReady = await waitForInitSegment(streamId, CONFIG.streaming.navigationTimeout);
-
-  if(!initReady) {
-
-    if(!res.headersSent) {
-
-      res.setHeader("Retry-After", "5");
-      res.status(503).send("Stream is starting. Please retry.");
-    } else {
-
-      LOG.warn("MPEG-TS init segment timeout for %s.", channelName);
-      res.end();
-    }
-
-    return;
-  }
-
-  // Get the stream from the registry and verify it's still alive with a valid init segment.
   const stream = getStream(streamId);
 
-  if(!stream?.hls.initSegment) {
+  if(!stream?.mpegTsStream) {
 
     if(!res.headersSent) {
 
@@ -215,104 +194,7 @@ async function serveMpegTsStream(streamId: number, channelName: string, req: Req
 
   const streamLog = LOG.withStreamId(stream.streamIdStr);
 
-  // Track which segments have been written to FFmpeg stdin to avoid duplicates during the catchup phase. When we subscribe to segment events and then write
-  // existing segments, a new segment could arrive via the event that we also encounter in the existing segment iteration. The Set prevents writing it twice.
-  const sentSegments = new Set<string>();
-  let cleanedUp = false;
-
-  // We declare cleanup as a let initialized to a no-op so the error callback and stdin error handler can reference it before the real implementation is assigned. It
-  // is reassigned to the real cleanup function immediately after all handlers are defined, before any asynchronous events can fire.
-  let cleanup: () => void = () => { /* No-op until real cleanup is assigned below. */ };
-
-  // Spawn an FFmpeg process to remux fMP4 to MPEG-TS. The process reads concatenated fMP4 (init segment + media segments) from stdin and outputs a continuous
-  // MPEG-TS stream on stdout. Video (H264) and audio (AAC) are copied without transcoding.
-  const remuxer = spawnMpegTsRemuxer((error) => {
-
-    streamLog.debug("streaming:mpegts", "MPEG-TS remuxer error: %s.", formatError(error));
-    cleanup();
-
-    if(!res.writableEnded) {
-
-      res.end();
-    }
-  }, stream.streamIdStr);
-
-  // Handler for new media segments. Writes each segment to FFmpeg stdin and updates the last access timestamp to prevent idle timeout.
-  const onSegment = (filename: string, data: Buffer): void => {
-
-    if(cleanedUp || sentSegments.has(filename)) {
-
-      return;
-    }
-
-    sentSegments.add(filename);
-    remuxer.stdin.write(data);
-    updateLastAccess(streamId);
-  };
-
-  // Handler for stream termination. Ends FFmpeg stdin gracefully so it can flush remaining data and exit cleanly.
-  const onTerminated = (): void => {
-
-    if(cleanedUp) {
-
-      return;
-    }
-
-    remuxer.stdin.end();
-  };
-
-  // Suppress errors from writing to a closed FFmpeg stdin. This can happen during cleanup when the capture stream closes before we stop writing.
-  remuxer.stdin.on("error", () => {
-
-    cleanup();
-  });
-
-  // Assign the real cleanup function. This is idempotent — the cleanedUp flag ensures it only runs once regardless of which event triggers it first (client
-  // disconnect, stream termination, or FFmpeg error).
-  cleanup = (): void => {
-
-    if(cleanedUp) {
-
-      return;
-    }
-
-    cleanedUp = true;
-
-    // Decrement the client counter. Re-read the stream from the registry since it may have been unregistered during stream termination.
-    const currentStream = getStream(streamId);
-
-    if(currentStream) {
-
-      currentStream.mpegTsClientCount = Math.max(0, currentStream.mpegTsClientCount - 1);
-
-      // When the last MPEG-TS client disconnects, reset the idle timer so the stream gets the standard idle timeout grace period before cleanup. This gives
-      // channel-surfing users time to switch back without the stream being torn down immediately.
-      if(currentStream.mpegTsClientCount === 0) {
-
-        updateLastAccess(streamId);
-      }
-    }
-
-    unregisterClient(streamId, clientAddress, "mpegts");
-
-    stream.hls.segmentEmitter.off("segment", onSegment);
-    stream.hls.segmentEmitter.off("terminated", onTerminated);
-    remuxer.kill();
-
-    streamLog.debug("streaming:mpegts", "MPEG-TS client disconnected.");
-  };
-
-  // Clean up when the client disconnects. Registered immediately after cleanup is assigned to minimize the window where a disconnect could be missed.
-  req.on("close", () => {
-
-    cleanup();
-  });
-
-  // Subscribe to segment events BEFORE writing existing segments to avoid missing any segments added during the catchup phase.
-  stream.hls.segmentEmitter.on("segment", onSegment);
-  stream.hls.segmentEmitter.on("terminated", onTerminated);
-
-  // Set response headers if they haven't been flushed yet (fast path for existing streams).
+  // Set response headers if they haven't been sent yet.
   if(!res.headersSent) {
 
     res.setHeader("Cache-Control", "no-cache");
@@ -321,25 +203,29 @@ async function serveMpegTsStream(streamId: number, channelName: string, req: Req
     res.setHeader("transferMode.dlna.org", "Streaming");
   }
 
-  // Pipe FFmpeg stdout to the HTTP response. When FFmpeg exits (either from stdin ending or being killed), stdout closes and the response ends automatically.
-  remuxer.stdout.pipe(res);
+  // Pipe FFmpeg's MPEG-TS output directly to the HTTP response. No segmenter, no remuxer, no HLS.
+  stream.mpegTsStream.pipe(res);
 
-  // Write the init segment first — FFmpeg needs the ftyp and moov boxes before it can process any media segments.
-  remuxer.stdin.write(stream.hls.initSegment);
+  streamLog.debug("streaming:mpegts", "MPEG-TS client connected (direct pipe).");
 
-  // Write all existing media segments to provide immediate playback catchup. The sentSegments Set deduplicates against any segments received via the event handler
-  // during this iteration.
-  for(const [ filename, data ] of stream.hls.segments) {
+  // Clean up when the client disconnects.
+  req.on("close", () => {
 
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    if(cleanedUp) {
+    const currentStream = getStream(streamId);
 
-      break;
+    if(currentStream) {
+
+      currentStream.mpegTsClientCount = Math.max(0, currentStream.mpegTsClientCount - 1);
+
+      if(currentStream.mpegTsClientCount === 0) {
+
+        updateLastAccess(streamId);
+      }
     }
 
-    sentSegments.add(filename);
-    remuxer.stdin.write(data);
-  }
+    unregisterClient(streamId, clientAddress, "mpegts");
+    stream.mpegTsStream?.unpipe(res);
 
-  streamLog.debug("streaming:mpegts", "MPEG-TS client connected.");
+    streamLog.debug("streaming:mpegts", "MPEG-TS client disconnected.");
+  });
 }
