@@ -856,43 +856,38 @@ async function launchBrowser(): Promise<Browser> {
           var entry = activeCaptures.values().next().value;
           if (!entry || !entry.pc || !entry.stream) return null;
 
+          // Match the working werift answer.html example exactly:
+          // 1. Add tracks FIRST (before setRemoteDescription) — just like the example does with getUserMedia
+          var videoTrack = entry.stream.getVideoTracks()[0];
+          entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
+
+          // 2. Set remote description (werift's offer)
           await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
 
-          // Find the transceiver created by the offer and put our video track on it.
-          var videoTrack = entry.stream.getVideoTracks()[0];
-          var transceivers = entry.pc.getTransceivers();
-          var videoTransceiver = null;
-          for (var i = 0; i < transceivers.length; i++) {
-            if (transceivers[i].receiver.track && transceivers[i].receiver.track.kind === "video") {
-              videoTransceiver = transceivers[i];
-              break;
-            }
-          }
-
-          if (videoTransceiver) {
-            await videoTransceiver.sender.replaceTrack(videoTrack);
-            videoTransceiver.direction = "sendonly";
-            entry.videoSender = videoTransceiver.sender;
-          } else {
-            // Fallback: addTrack if no matching transceiver found.
-            entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
-          }
-
+          // 3. Create and set answer
           var answer = await entry.pc.createAnswer();
           await entry.pc.setLocalDescription(answer);
 
-          // Force bitrate after connection establishes.
-          entry.pc.onconnectionstatechange = function() {
-            if (entry.pc.connectionState === "connected" && entry.videoSender) {
-              var params = entry.videoSender.getParameters();
-              if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-              params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
-              params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
-              params.encodings[0].scaleResolutionDownBy = 1.0;
-              entry.videoSender.setParameters(params);
-            }
-          };
+          // 4. Wait for ICE gathering to complete — answer must include candidates
+          await new Promise(function(resolve) {
+            if (entry.pc.iceGatheringState === "complete") { resolve(); return; }
+            entry.pc.onicecandidate = function(e) {
+              if (!e.candidate) resolve();
+            };
+            setTimeout(resolve, 5000);
+          });
 
+          // 5. Force bitrate
+          if (entry.videoSender) {
+            var params = entry.videoSender.getParameters();
+            if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+            params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
+            params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
+            params.encodings[0].scaleResolutionDownBy = 1.0;
+            await entry.videoSender.setParameters(params);
+          }
+
+          // 6. Return FULL localDescription (with ICE candidates) — not the original answer
           return entry.pc.localDescription.sdp;
         };
 
@@ -960,8 +955,6 @@ async function launchBrowser(): Promise<Browser> {
               activeCaptures.delete(key);
             });
           }
-          globalThis.WEBRTC_OFFER = null;
-          globalThis.WEBRTC_READY = false;
           origStopRecording(index);
         };
       })()`;
