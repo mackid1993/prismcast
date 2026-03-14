@@ -505,6 +505,35 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         }
       });
 
+      // Diagnostic logging for capture stream health. Logs bytes/sec and chunks/sec from puppeteer-stream every 5 seconds to identify capture-side delivery issues.
+      let captureBytes = 0;
+      let captureChunks = 0;
+      const captureLogInterval = setInterval(() => {
+
+        if(captureBytes > 0) {
+
+          const kbps = Math.round((captureBytes * 8) / 5000);
+
+          LOG.info("%sCapture: %d kbps, %d chunks/5s (avg %d bytes/chunk).",
+            streamId ? "[" + streamId + "] " : "", kbps, captureChunks, captureChunks > 0 ? Math.round(captureBytes / captureChunks) : 0);
+          captureBytes = 0;
+          captureChunks = 0;
+        }
+      }, 5000);
+
+      captureLogInterval.unref();
+
+      (rawCaptureStream as Readable).on("data", (chunk: Buffer) => {
+
+        captureBytes += chunk.length;
+        captureChunks++;
+      });
+
+      (rawCaptureStream as Readable).on("close", () => {
+
+        clearInterval(captureLogInterval);
+      });
+
       // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup. When FFmpeg is killed during tab replacement, pipeline() automatically
       // destroys the source stream, preventing "write after end" errors that would occur with .pipe().
       pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {

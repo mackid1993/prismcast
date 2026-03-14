@@ -578,6 +578,12 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
     storeSegment(streamId, segmentName, segmentData);
     state.lastSegmentSize = segmentData.length;
 
+    // Log segment diagnostics: duration, size, fragment count, and wall-clock timing.
+    const wallDuration = (Date.now() - state.segmentStartTime) / 1000;
+
+    LOG.info("Segment %d: %.2fs media, %.2fs wall, %d KB, %d fragments.",
+      state.segmentIndex, actualDuration, wallDuration, Math.round(segmentData.length / 1024), state.fragmentBuffer.length);
+
     // Increment segment index and mark the first segment as emitted.
     state.segmentIndex++;
     state.firstSegmentEmitted = true;

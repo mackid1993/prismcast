@@ -207,7 +207,8 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
 
   const ffmpegArgs = [
     "-hide_banner",
-    "-loglevel", "warning",
+    "-loglevel", "info",
+    "-progress", "pipe:2",
     "-probesize", "16384",
     "-i", "pipe:0",
     "-c:v", "libx264",
@@ -244,10 +245,13 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
   // Track whether graceful shutdown has been initiated. When true, we suppress error callbacks because any exit (whether from SIGTERM or stdin close) is expected.
   let shuttingDown = false;
 
-  // Log FFmpeg stderr output (warnings and errors). stderr is guaranteed to be a Readable since we set stdio: ["pipe", "pipe", "pipe"].
+  // Parse FFmpeg progress stats from stderr. With -progress pipe:2, FFmpeg writes key=value pairs. We extract frame count, fps, speed, and bitrate and log them
+  // every 5 seconds to diagnose encoding performance and frame delivery issues.
+  let lastProgressLog = Date.now();
+  const progressStats: Record<string, string> = {};
+
   ffmpeg.stderr.on("data", (data: Buffer) => {
 
-    // Suppress warnings during shutdown - truncated input warnings are expected when the capture stream closes.
     if(shuttingDown) {
 
       return;
@@ -255,17 +259,45 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
 
     const message = data.toString().trim();
 
-    // Filter out common noise that isn't actionable.
-    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=" ];
+    // Parse progress key=value pairs from -progress pipe:2.
+    for(const line of message.split("\n")) {
 
-    if(noisePatterns.some((pattern) => message.includes(pattern))) {
+      const eqIdx = line.indexOf("=");
 
-      return;
+      if(eqIdx > 0) {
+
+        progressStats[line.substring(0, eqIdx).trim()] = line.substring(eqIdx + 1).trim();
+      }
     }
 
-    if(message.length > 0) {
+    // Log progress every 5 seconds.
+    const now = Date.now();
 
-      LOG.debug("streaming:ffmpeg", "%sFFmpeg: %s", logPrefix, message);
+    if((now - lastProgressLog) >= 5000) {
+
+      const frame = progressStats["frame"] ?? "?";
+      const fps = progressStats["fps"] ?? "?";
+      const speed = progressStats["speed"] ?? "?";
+      const bitrate = progressStats["bitrate"] ?? "?";
+      const drop = progressStats["drop_frames"] ?? "0";
+
+      LOG.info("%sFFmpeg: frame=%s fps=%s speed=%s bitrate=%s dropped=%s", logPrefix, frame, fps, speed, bitrate, drop);
+      lastProgressLog = now;
+    }
+
+    // Still log warnings/errors that aren't progress data.
+    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+
+    for(const line of message.split("\n")) {
+
+      const trimmed = line.trim();
+
+      if((trimmed.length === 0) || trimmed.includes("=") || noisePatterns.some((p) => trimmed.includes(p))) {
+
+        continue;
+      }
+
+      LOG.debug("streaming:ffmpeg", "%sFFmpeg: %s", logPrefix, trimmed);
     }
   });
 
