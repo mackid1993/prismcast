@@ -113,7 +113,7 @@ RUN if [ "$BUILD_FROM_SOURCE" = "true" ]; then \
     && rm -rf /tmp/prismcast-src
 
 # Create a Chrome wrapper script that passes --no-sandbox for container environments and enables Intel VA-API hardware video encoding.
-RUN printf '#!/bin/bash\nGPU_FLAGS=""\nif [ -e /dev/dri/renderD128 ]; then\n  GPU_FLAGS="--use-gl=egl --use-angle=vulkan --enable-features=AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder,VaapiVideoDecoder,VaapiVideoEncoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy"\nfi\nexec /usr/bin/google-chrome-stable --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox $GPU_FLAGS "$@"\n' > /usr/local/bin/chrome-no-sandbox \
+RUN printf '#!/bin/bash\nexec /usr/bin/google-chrome-stable --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --enable-features=VaapiVideoDecoder,VaapiVideoEncoder,AcceleratedVideoEncoder,VaapiIgnoreDriverChecks --ignore-gpu-blocklist "$@"\n' > /usr/local/bin/chrome-no-sandbox \
     && chmod +x /usr/local/bin/chrome-no-sandbox
 
 # Copy the startup script into the container.
