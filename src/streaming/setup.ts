@@ -8,6 +8,7 @@ import { LOG, delay, extractDomain, formatError, registerAbortController, retryO
   spawnFFmpeg, spawnWebRTCFFmpeg, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
+import { getExtensionPage } from "puppeteer-stream";
 import { getNextStreamId, getStreamCount } from "./registry.js";
 import { getProfileForChannel, getProfileForUrl, getProfiles, resolveProfile } from "../config/profiles.js";
 import { initializePlayback, navigateToPage } from "../browser/video.js";
@@ -20,6 +21,7 @@ import { getEffectiveViewport } from "../config/presets.js";
 import { getProviderDisplayName } from "../config/providers.js";
 import { isChannelSelectionProfile } from "../types/index.js";
 import { monitorPlaybackHealth } from "./monitor.js";
+import { pipeline } from "node:stream/promises";
 import { resizeAndMinimizeWindow } from "../browser/cdp.js";
 
 /* This module contains the common stream setup logic for HLS streaming. The core logic is split into two functions:
@@ -473,12 +475,6 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the capture stream to fMP4.
     if(useFFmpeg) {
 
-      // The WebRTC monkey-patch sends type-prefixed messages: 0x01 = H264 video, 0x02 = WebM/Opus audio. Use the dual-input FFmpeg that accepts video on fd 3
-      // and audio on fd 4. If the monkey-patch isn't active (macOS bare metal), the capture stream is standard WebM and goes through the single-input pipeline.
-      // Check if the first chunk has the 0x01/0x02 prefix to detect WebRTC mode. We'll use a simple flag set after first data arrives.
-      let webrtcDetected = false;
-      let firstChunkProcessed = false;
-
       const ffmpegError = (error: Error): void => {
 
         LOG.error("FFmpeg process error: %s.", formatError(error));
@@ -489,107 +485,122 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         }
       };
 
-      // Spawn WebRTC dual-input FFmpeg. Video (raw H264) on fd 3, audio (WebM/Opus) on fd 4.
-      const webrtcFFmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.frameRate,
-        ffmpegError, streamId, comment);
+      // Try WebRTC capture: poll for SDP offer from the monkey-patch, create werift peer, exchange SDP.
+      // Video arrives via WebRTC RTP (depacketized by werift to Annex B H264). Audio arrives via WebSocket (0x02 prefix, WebM/Opus).
+      // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
+      let useWebRTC = false;
+      let webrtcPeer: import("../utils/webrtcCapture.js").WebRTCCapturePeer | undefined;
 
-      // Also spawn standard FFmpeg as fallback in case the WebRTC patch isn't active.
-      const standardFFmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
-        CONFIG.streaming.frameRate, ffmpegError, streamId, comment);
+      // Check if the WebRTC monkey-patch is active by polling for the SDP offer.
+      const extensionPage = await getExtensionPage(await getCurrentBrowser());
 
-      // Diagnostic logging.
-      let videoBytes = 0;
-      let videoChunks = 0;
-      let audioBytes = 0;
-      let audioChunks = 0;
-      const captureLogInterval = setInterval(() => {
+      try {
 
-        if(webrtcDetected && ((videoBytes > 0) || (audioBytes > 0))) {
+        // Wait up to 3 seconds for the WebRTC offer to appear.
+        for(let i = 0; i < 30; i++) {
 
-          LOG.info("%sWebRTC capture: video %d kbps (%d chunks), audio %d kbps (%d chunks).",
-            streamId ? "[" + streamId + "] " : "",
-            Math.round((videoBytes * 8) / 5000), videoChunks,
-            Math.round((audioBytes * 8) / 5000), audioChunks);
-          videoBytes = 0;
-          videoChunks = 0;
-          audioBytes = 0;
-          audioChunks = 0;
-        }
-      }, 5000);
+          const ready = await extensionPage.evaluate("globalThis.WEBRTC_READY") as boolean;
 
-      captureLogInterval.unref();
+          if(ready) {
 
-      // Route data based on format detection.
-      rawCaptureStream.on("data", (chunk: Buffer) => {
+            const offer = await extensionPage.evaluate("globalThis.WEBRTC_OFFER") as string;
 
-        if(!firstChunkProcessed && (chunk.length >= 2)) {
+            if(offer) {
 
-          firstChunkProcessed = true;
-          webrtcDetected = (chunk[0] === 0x01) || (chunk[0] === 0x02);
+              LOG.info("WebRTC SDP offer received, creating werift peer...");
 
-          if(webrtcDetected) {
+              // Create werift peer and answer the offer.
+              const { createWebRTCCapturePeer } = await import("../utils/webrtcCapture.js");
 
-            LOG.info("WebRTC capture detected — using dual-input FFmpeg.");
+              webrtcPeer = createWebRTCCapturePeer(streamId);
+              const answer = await webrtcPeer.createAnswer(offer);
 
-            // Kill the standard FFmpeg since we're using WebRTC mode.
-            standardFFmpeg.kill();
-          } else {
+              // Send answer back to Chrome.
+              await extensionPage.evaluate("WEBRTC_SET_ANSWER(" + JSON.stringify(answer) + ")");
 
-            LOG.info("Standard MediaRecorder capture detected.");
+              // Exchange ICE candidates from Chrome → werift.
+              const iceCandidates = await extensionPage.evaluate("globalThis.WEBRTC_ICE_CANDIDATES") as string[];
 
-            // Kill the WebRTC FFmpeg since we're using standard mode.
-            webrtcFFmpeg.kill();
-          }
-        }
+              if(iceCandidates) {
 
-        if(webrtcDetected) {
+                for(const candidate of iceCandidates) {
 
-          const type = chunk[0];
-          const payload = chunk.subarray(1);
+                  // werift handles ICE internally via the SDP — candidates are usually in the offer for local connections.
+                  LOG.debug("streaming:webrtc", "ICE candidate from Chrome: %s", candidate.substring(0, 50));
+                }
+              }
 
-          if((type === 0x01) && webrtcFFmpeg.videoPipe) {
+              useWebRTC = true;
+              LOG.info("WebRTC capture established.");
 
-            videoBytes += payload.length;
-            videoChunks++;
-            webrtcFFmpeg.videoPipe.write(payload);
-          } else if((type === 0x02) && webrtcFFmpeg.audioPipe) {
-
-            audioBytes += payload.length;
-            audioChunks++;
-            webrtcFFmpeg.audioPipe.write(payload);
-          } else if(type === 0xFF) {
-
-            LOG.info("%sWebRTC: %s", streamId ? "[" + streamId + "] " : "", payload.toString("utf8"));
-          }
-        } else {
-
-          standardFFmpeg.stdin.write(chunk);
-        }
-      });
-
-      rawCaptureStream.on("close", () => {
-
-        clearInterval(captureLogInterval);
-
-        if(webrtcDetected) {
-
-          if(webrtcFFmpeg.videoPipe) {
-
-            webrtcFFmpeg.videoPipe.end();
+              break;
+            }
           }
 
-          if(webrtcFFmpeg.audioPipe) {
-
-            webrtcFFmpeg.audioPipe.end();
-          }
-        } else {
-
-          standardFFmpeg.stdin.end();
+          await delay(100);
         }
-      });
+      } catch(err) {
 
-      // Handle stdout errors on both FFmpeg instances.
-      const handleStdoutError = (ffmpeg: FFmpegProcess, label: string): void => {
+        LOG.warn("WebRTC signaling failed: %s. Falling back to MediaRecorder.", formatError(err));
+      }
+
+      if(useWebRTC && webrtcPeer) {
+
+        // WebRTC mode: video from werift, audio from WebSocket.
+        const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.frameRate,
+          ffmpegError, streamId, comment);
+
+        ffmpegProcess = {
+
+          ...ffmpeg,
+          kill: (): void => {
+
+            ffmpeg.kill();
+            webrtcPeer?.close();
+          }
+        };
+
+        // Pipe werift's H264 video stream to FFmpeg's video pipe (fd 3).
+        if(ffmpeg.videoPipe) {
+
+          webrtcPeer.videoStream.pipe(ffmpeg.videoPipe);
+        }
+
+        // Pipe audio (0x02 prefixed WebM/Opus) from puppeteer-stream WebSocket to FFmpeg's audio pipe (fd 4).
+        rawCaptureStream.on("data", (chunk: Buffer) => {
+
+          if((chunk.length >= 2) && (chunk[0] === 0x02) && ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.write(chunk.subarray(1));
+          }
+        });
+
+        rawCaptureStream.on("close", () => {
+
+          if(ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.end();
+          }
+        });
+
+        ffmpeg.stdout.on("error", (error) => {
+
+          const errorMessage = formatError(error);
+
+          if(!errorMessage.includes("EPIPE")) {
+
+            LOG.error("WebRTC FFmpeg stdout error: %s.", errorMessage);
+          }
+        });
+
+        outputStream = ffmpeg.stdout;
+      } else {
+
+        // Standard MediaRecorder pipeline (fallback).
+        const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
+          CONFIG.streaming.frameRate, ffmpegError, streamId, comment);
+
+        ffmpegProcess = ffmpeg;
 
         ffmpeg.stdout.on("error", (error) => {
 
@@ -597,10 +608,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
           if(errorMessage.includes("EPIPE")) {
 
-            LOG.debug("streaming:ffmpeg", "%s stdout pipe closed: %s.", label, errorMessage);
+            LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
           } else {
 
-            LOG.error("%s stdout pipe error: %s.", label, errorMessage);
+            LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
             ffmpeg.kill();
 
             if(onFFmpegError) {
@@ -609,27 +620,27 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
             }
           }
         });
-      };
 
-      handleStdoutError(webrtcFFmpeg, "WebRTC FFmpeg");
-      handleStdoutError(standardFFmpeg, "Standard FFmpeg");
+        pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
 
-      // Create a combined FFmpeg process that kills whichever one is active.
-      ffmpegProcess = {
+          const errorMessage = formatError(error);
 
-        kill: (): void => {
+          if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
 
-          webrtcFFmpeg.kill();
-          standardFFmpeg.kill();
-        },
-        process: webrtcFFmpeg.process,
-        stdin: standardFFmpeg.stdin,
-        stdout: webrtcFFmpeg.stdout
-      };
+            return;
+          }
 
-      // Use the WebRTC FFmpeg stdout for now — if standard mode is detected, this gets swapped.
-      // TODO: This is a simplification. In production, we'd wait for detection before choosing.
-      outputStream = webrtcFFmpeg.stdout;
+          LOG.error("Capture pipeline error: %s.", errorMessage);
+          ffmpeg.kill();
+
+          if(onFFmpegError) {
+
+            onFFmpegError(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+
+        outputStream = ffmpeg.stdout;
+      }
     } else {
 
       // Native fMP4 mode: Use the raw capture stream directly. In this mode, rawCaptureStream and outputStream are the same object.

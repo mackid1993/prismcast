@@ -830,12 +830,15 @@ async function launchBrowser(): Promise<Browser> {
 
       await extensionPage.waitForFunction("typeof START_RECORDING === 'function'", { timeout: CONFIG.browser.initTimeout });
 
-      // Monkey-patch START_RECORDING to use WebRTC for encoding instead of MediaRecorder. Chrome uses hardware-accelerated encoding for WebRTC (VA-API on Linux,
-      // VideoToolbox on macOS) but software encoding for MediaRecorder. By routing the tabCapture stream through a local RTCPeerConnection loopback, we get hardware
-      // encoding with no dropped frames. Encoded H264 frames are intercepted via Insertable Streams (Encoded Transform) and sent over the existing WebSocket.
+      // Monkey-patch START_RECORDING to use WebRTC for video encoding instead of MediaRecorder. Chrome uses hardware-accelerated encoding for WebRTC (VA-API on
+      // Linux, VideoToolbox on macOS) but software encoding for MediaRecorder. The extension creates an RTCPeerConnection and SDP offer, which Node.js answers using
+      // a werift peer. Chrome sends H264 RTP to the werift peer on localhost — proper RTCP feedback ensures the encoder ramps to full quality.
       //
-      // Data format: same as WebCodecs approach — 0x01 prefix for video, 0x02 for audio.
-      // Audio still uses MediaRecorder (audio-only) since WebRTC Opus is fine but we need AAC for HLS compatibility via FFmpeg.
+      // Audio still uses MediaRecorder (audio-only WebM/Opus) sent over the existing WebSocket with 0x02 prefix.
+      // Video goes via WebRTC RTP to werift (not over WebSocket) — werift depacketizes to Annex B H264 for FFmpeg.
+      //
+      // Signaling: The extension stores the SDP offer in globalThis.WEBRTC_OFFER and ICE candidates in globalThis.WEBRTC_ICE_CANDIDATES.
+      // Node.js reads them via page.evaluate() and sends the answer back via page.evaluate("WEBRTC_SET_ANSWER(...)").
       // eslint-disable-next-line no-restricted-syntax
       const webrtcPatch = `(function() {
         var PRISMCAST_BITRATE = ` + String(CONFIG.streaming.videoBitsPerSecond) + `;
@@ -843,11 +846,31 @@ async function launchBrowser(): Promise<Browser> {
         var origStopRecording = globalThis.STOP_RECORDING;
         var activeCaptures = new Map();
 
+        // Signaling state — Node.js reads these via page.evaluate().
+        globalThis.WEBRTC_OFFER = null;
+        globalThis.WEBRTC_ICE_CANDIDATES = [];
+        globalThis.WEBRTC_READY = false;
+
+        // Node.js calls this to deliver the SDP answer.
+        globalThis.WEBRTC_SET_ANSWER = function(sdp) {
+          var entry = activeCaptures.values().next().value;
+          if (entry && entry.pc) {
+            entry.pc.setRemoteDescription({ type: "answer", sdp: sdp });
+          }
+        };
+
+        // Node.js calls this to deliver an ICE candidate.
+        globalThis.WEBRTC_ADD_ICE_CANDIDATE = function(candidate) {
+          var entry = activeCaptures.values().next().value;
+          if (entry && entry.pc) {
+            entry.pc.addIceCandidate(JSON.parse(candidate));
+          }
+        };
+
         globalThis.START_RECORDING = async function(opts) {
           var index = opts.index;
           var port = window.location.hash.substring(1);
 
-          // Get tab capture stream. Resolution is determined by the tab's viewport, not capture constraints.
           var captureStream = await new Promise(function(resolve, reject) {
             chrome.tabCapture.capture({ audio: true, video: true }, function(stream) {
               if (!stream || chrome.runtime.lastError) {
@@ -858,7 +881,7 @@ async function launchBrowser(): Promise<Browser> {
             });
           });
 
-          // Connect to puppeteer-stream WebSocket.
+          // WebSocket for audio data only.
           var ws = new WebSocket("ws://localhost:" + port + "/?index=" + index);
           await new Promise(function(resolve, reject) {
             ws.onopen = resolve;
@@ -866,25 +889,15 @@ async function launchBrowser(): Promise<Browser> {
           });
           ws.binaryType = "arraybuffer";
 
-          // Create local WebRTC loopback — sender encodes with hardware, we intercept the encoded frames.
-          var sender = new RTCPeerConnection({ encodedInsertableStreams: true });
-          var receiver = new RTCPeerConnection({ encodedInsertableStreams: true });
+          // Create RTCPeerConnection for video — sends H264 RTP to Node.js werift peer.
+          var pc = new RTCPeerConnection();
 
-          // Route ICE candidates between the local peers.
-          sender.onicecandidate = function(e) {
-            if (e.candidate) receiver.addIceCandidate(e.candidate);
-          };
-          receiver.onicecandidate = function(e) {
-            if (e.candidate) sender.addIceCandidate(e.candidate);
-          };
-
-          // Add video track to sender — this triggers hardware encoding.
+          // Add video track.
           var videoTrack = captureStream.getVideoTracks()[0];
-          var videoSender = sender.addTrack(videoTrack, captureStream);
+          var videoSender = pc.addTrack(videoTrack, captureStream);
 
-          // Force H264 codec. Chrome defaults to VP8 for WebRTC but H264 has better hardware encoding support and
-          // downstream compatibility (HLS/MPEG-TS need H264). Use setCodecPreferences to filter to H264 only.
-          var transceivers = sender.getTransceivers();
+          // Force H264 codec.
+          var transceivers = pc.getTransceivers();
           if (transceivers.length > 0) {
             var h264Codecs = RTCRtpReceiver.getCapabilities("video").codecs.filter(function(c) {
               return c.mimeType === "video/H264";
@@ -892,43 +905,15 @@ async function launchBrowser(): Promise<Browser> {
             if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
           }
 
-          // Intercept encoded video frames using a TransformStream that copies each frame to the WebSocket while passing it through
-          // to the receiver. The receiver MUST get the frames so it sends RTCP feedback — without feedback, the encoder stays at minimum quality.
-          var senderStreams = videoSender.createEncodedStreams();
-          var diagCount = 0;
-          var transformer = new TransformStream({
-            transform: function(frame, controller) {
-              try {
-                var data = new Uint8Array(frame.data);
-
-                // Log first 16 bytes of first 5 frames to diagnose H264 format.
-                if (diagCount < 5) {
-                  var hex = Array.from(data.slice(0, 16)).map(function(b) { return b.toString(16).padStart(2, "0"); }).join(" ");
-                  var diagMsg = "frame " + diagCount + ": type=" + frame.type + " size=" + data.length + " hex=" + hex;
-                  var diagBuf = new TextEncoder().encode("DIAG:" + diagMsg);
-                  var diagPkt = new Uint8Array(1 + diagBuf.length);
-                  diagPkt[0] = 0xFF;
-                  diagPkt.set(diagBuf, 1);
-                  if (ws.readyState === WebSocket.OPEN) ws.send(diagPkt.buffer);
-                  diagCount++;
-                }
-
-                var msg = new Uint8Array(1 + data.length);
-                msg[0] = 0x01;
-                msg.set(data, 1);
-                if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
-                controller.enqueue(frame);
-              } catch(err) {
-                console.error("WebRTC transform error:", err);
-                controller.enqueue(frame);
-              }
+          // Collect ICE candidates for Node.js.
+          globalThis.WEBRTC_ICE_CANDIDATES = [];
+          pc.onicecandidate = function(e) {
+            if (e.candidate) {
+              globalThis.WEBRTC_ICE_CANDIDATES.push(JSON.stringify(e.candidate));
             }
-          });
-          senderStreams.readable.pipeThrough(transformer).pipeTo(senderStreams.writable).catch(function(err) {
-            console.error("WebRTC pipeline ended:", err);
-          });
+          };
 
-          // Audio: use MediaRecorder (audio-only) — WebRTC Opus is fine but we need the WebM container for FFmpeg.
+          // Audio: MediaRecorder (audio-only) over WebSocket.
           var audioStream = new MediaStream(captureStream.getAudioTracks());
           var recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm;codecs=opus" });
           recorder.ondataavailable = async function(e) {
@@ -941,32 +926,32 @@ async function launchBrowser(): Promise<Browser> {
           };
           recorder.start(20);
 
-          // Complete the SDP negotiation to start encoding.
-          var offer = await sender.createOffer();
-          await sender.setLocalDescription(offer);
-          await receiver.setRemoteDescription(offer);
-          var answer = await receiver.createAnswer();
-          await receiver.setLocalDescription(answer);
-          await sender.setRemoteDescription(answer);
+          // Create SDP offer and store for Node.js to read.
+          var offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          globalThis.WEBRTC_OFFER = offer.sdp;
+          globalThis.WEBRTC_READY = true;
 
-          // Force high bitrate and frame rate. Without this, WebRTC's congestion control throttles to near-zero because
-          // the loopback receiver never sends RTCP feedback (no real network = no congestion signals).
-          var params = videoSender.getParameters();
-          if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-          params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
-          params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
-          params.encodings[0].scaleResolutionDownBy = 1.0;
-          await videoSender.setParameters(params);
+          // Force bitrate after connection establishes.
+          pc.onconnectionstatechange = function() {
+            if (pc.connectionState === "connected") {
+              var params = videoSender.getParameters();
+              if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+              params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
+              params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
+              params.encodings[0].scaleResolutionDownBy = 1.0;
+              videoSender.setParameters(params);
+            }
+          };
 
-          activeCaptures.set(index, { sender: sender, receiver: receiver, recorder: recorder, stream: captureStream, ws: ws });
+          activeCaptures.set(index, { pc: pc, recorder: recorder, stream: captureStream, ws: ws });
         };
 
         globalThis.STOP_RECORDING = function(index) {
           if (index !== undefined) {
             var entry = activeCaptures.get(index);
             if (entry) {
-              try { entry.sender.close(); } catch(e) {}
-              try { entry.receiver.close(); } catch(e) {}
+              try { entry.pc.close(); } catch(e) {}
               try { entry.recorder.stop(); } catch(e) {}
               try { entry.ws.close(); } catch(e) {}
               entry.stream.getTracks().forEach(function(t) { t.stop(); });
@@ -974,20 +959,21 @@ async function launchBrowser(): Promise<Browser> {
             }
           } else {
             activeCaptures.forEach(function(entry, key) {
-              try { entry.sender.close(); } catch(e) {}
-              try { entry.receiver.close(); } catch(e) {}
+              try { entry.pc.close(); } catch(e) {}
               try { entry.recorder.stop(); } catch(e) {}
               try { entry.ws.close(); } catch(e) {}
               entry.stream.getTracks().forEach(function(t) { t.stop(); });
               activeCaptures.delete(key);
             });
           }
+          globalThis.WEBRTC_OFFER = null;
+          globalThis.WEBRTC_READY = false;
           origStopRecording(index);
         };
       })()`;
 
       await extensionPage.evaluate(webrtcPatch);
-      LOG.info("WebRTC capture monkey-patch installed (hardware encoding via RTCPeerConnection loopback).");
+      LOG.info("WebRTC capture monkey-patch installed.");
     } catch {
 
       // If the extension page isn't found or START_RECORDING doesn't appear within the timeout, log a warning and proceed. The per-stream

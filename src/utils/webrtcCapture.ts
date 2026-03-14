@@ -2,9 +2,9 @@
  *
  * webrtcCapture.ts: WebRTC-based video capture using werift for hardware-accelerated H264 encoding.
  */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
 
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — werift/nonstandard uses package.json exports which moduleResolution:"node" doesn't resolve.
+// @ts-expect-error — werift/nonstandard uses package.json exports which moduleResolution:"node" doesn't resolve.
 import { DepacketizeCallback, H264RtpPayload } from "werift/nonstandard";
 import { RTCPeerConnection, useH264 } from "werift";
 import type { Readable } from "node:stream";
