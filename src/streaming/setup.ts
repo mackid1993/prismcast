@@ -471,14 +471,6 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // Store the raw capture stream. This must be destroyed before closing the page.
     rawCaptureStream = stream as unknown as Readable;
 
-    // Inject a requestAnimationFrame pump into the captured page. On Linux with Xvfb, Chrome's compositor idles at ~51fps because nothing is requesting animation
-    // frames. The rAF loop forces the compositor to produce a frame for every animation tick, pushing it toward the display's maximum rate. On macOS with a real
-    // display this is a no-op since the compositor already runs at the display's native refresh rate.
-    if(process.platform === "linux") {
-
-      page.evaluate("(function pump() { requestAnimationFrame(pump); })()").catch(() => { /* ignore */ });
-    }
-
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
