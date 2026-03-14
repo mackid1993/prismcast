@@ -154,9 +154,17 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
   await pc.setLocalDescription(await pc.createOffer());
   const offerSdp = pc.localDescription?.sdp ?? "";
 
-  LOG.info("%sWebRTC: offer created, waiting for Chrome answer.", logPrefix);
+  // Log the offer SDP media lines for debugging.
+  const offerLines = offerSdp.split("\n").filter((l: string) => l.startsWith("m=") || l.startsWith("a=recvonly") || l.startsWith("a=sendonly") || l.startsWith("a=sendrecv") || l.startsWith("a=inactive") || l.startsWith("a=rtpmap"));
+
+  LOG.info("%sWebRTC offer SDP: %s", logPrefix, offerLines.join(" | "));
 
   const setAnswer = async (answer: string): Promise<void> => {
+
+    // Log answer SDP media lines.
+    const answerLines = answer.split("\n").filter((l: string) => l.startsWith("m=") || l.startsWith("a=recvonly") || l.startsWith("a=sendonly") || l.startsWith("a=sendrecv") || l.startsWith("a=inactive") || l.startsWith("a=rtpmap") || l.startsWith("a=candidate"));
+
+    LOG.info("%sWebRTC answer SDP: %s", logPrefix, answerLines.join(" | "));
 
     await pc.setRemoteDescription({ sdp: answer, type: "answer" });
     LOG.info("%sWebRTC: answer received, connection establishing.", logPrefix);
