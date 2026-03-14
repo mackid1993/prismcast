@@ -838,6 +838,8 @@ async function launchBrowser(): Promise<Browser> {
       // Audio still uses MediaRecorder (audio-only) since WebRTC Opus is fine but we need AAC for HLS compatibility via FFmpeg.
       // eslint-disable-next-line no-restricted-syntax
       const webrtcPatch = `(function() {
+        var PRISMCAST_BITRATE = ` + String(CONFIG.streaming.videoBitsPerSecond) + `;
+        var PRISMCAST_FRAMERATE = ` + String(CONFIG.streaming.frameRate) + `;
         var origStopRecording = globalThis.STOP_RECORDING;
         var activeCaptures = new Map();
 
@@ -845,7 +847,7 @@ async function launchBrowser(): Promise<Browser> {
           var index = opts.index;
           var port = window.location.hash.substring(1);
 
-          // Get tab capture stream.
+          // Get tab capture stream. Resolution is determined by the tab's viewport, not capture constraints.
           var captureStream = await new Promise(function(resolve, reject) {
             chrome.tabCapture.capture({ audio: true, video: true }, function(stream) {
               if (!stream || chrome.runtime.lastError) {
@@ -895,16 +897,22 @@ async function launchBrowser(): Promise<Browser> {
           var senderStreams = videoSender.createEncodedStreams();
           var transformer = new TransformStream({
             transform: function(frame, controller) {
-              var data = new Uint8Array(frame.data);
-              var msg = new Uint8Array(1 + data.length);
-              msg[0] = 0x01;
-              msg.set(data, 1);
-              if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
-              // Pass the frame through to the receiver for RTCP feedback.
-              controller.enqueue(frame);
+              try {
+                var data = new Uint8Array(frame.data);
+                var msg = new Uint8Array(1 + data.length);
+                msg[0] = 0x01;
+                msg.set(data, 1);
+                if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
+                controller.enqueue(frame);
+              } catch(err) {
+                console.error("WebRTC transform error:", err);
+                controller.enqueue(frame);
+              }
             }
           });
-          senderStreams.readable.pipeThrough(transformer).pipeTo(senderStreams.writable);
+          senderStreams.readable.pipeThrough(transformer).pipeTo(senderStreams.writable).catch(function(err) {
+            console.error("WebRTC pipeline ended:", err);
+          });
 
           // Audio: use MediaRecorder (audio-only) — WebRTC Opus is fine but we need the WebM container for FFmpeg.
           var audioStream = new MediaStream(captureStream.getAudioTracks());
@@ -931,8 +939,9 @@ async function launchBrowser(): Promise<Browser> {
           // the loopback receiver never sends RTCP feedback (no real network = no congestion signals).
           var params = videoSender.getParameters();
           if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-          params.encodings[0].maxBitrate = 20000000;
-          params.encodings[0].maxFramerate = 60;
+          params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
+          params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
+          params.encodings[0].scaleResolutionDownBy = 1.0;
           await videoSender.setParameters(params);
 
           activeCaptures.set(index, { sender: sender, receiver: receiver, recorder: recorder, stream: captureStream, ws: ws });
