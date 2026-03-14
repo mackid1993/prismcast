@@ -411,19 +411,21 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
       "-vf", cropFilter + "format=nv12,hwupload",
       "-c:v", "h264_vaapi",
       "-bf", "0",
+      "-r", String(frameRate),
       "-b:v", String(videoBitrate),
       "-maxrate", String(videoBitrate),
       "-bufsize", String(videoBitrate * 2)
     );
   } else {
 
-    const swCrop = needsCrop ? [ "-vf", cropFilter.slice(0, -1) ] : [];
+    const swCrop = needsCrop ? ["-vf", cropFilter.slice(0, -1)] : [];
 
     ffmpegArgs.push(
       ...swCrop,
       "-c:v", "libx264",
       "-preset", "ultrafast",
       "-bf", "0",
+      "-r", String(frameRate),
       "-b:v", String(videoBitrate),
       "-maxrate", String(videoBitrate),
       "-bufsize", String(videoBitrate * 2)
