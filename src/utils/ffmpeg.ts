@@ -374,6 +374,7 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
  */
 export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number,
   width: number, height: number, cropWidth: number, cropHeight: number,
+  audioSampleRate: number, audioChannels: number, segmentDuration: number,
   onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
   // Use system FFmpeg for VA-API hardware encoding when available.
@@ -385,18 +386,19 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: raw I420 video frames from native WebRTC RTCVideoSink. Wall-clock timestamps ensure video PTS advances at real time,
-    // matching audio PTS from the PCM input. Without this, FFmpeg defaults to 25fps PTS and video races ahead of audio, stalling the muxer.
-    "-use_wallclock_as_timestamps", "1",
+    // Input 0: raw I420 video frames from native WebRTC RTCVideoSink. Fixed input rate (-r) assigns perfectly smooth PTS —
+    // wall-clock timestamps cause jitter from pipe I/O backpressure, producing visible stutter even with cfr output.
     "-f", "rawvideo",
     "-pix_fmt", "yuv420p",
     "-video_size", String(width) + "x" + String(height),
+    "-r", String(frameRate),
     "-i", "pipe:3",
-    // Input 1: raw s16le PCM audio from RTCAudioSink (48kHz stereo). Wall-clock timestamps match the video input.
+    // Input 1: raw s16le PCM audio from RTCAudioSink. Format detected from first audio callback.
+    // Wall-clock timestamps keep audio PTS at real time; aresample=async handles A/V drift from video rate mismatch.
     "-use_wallclock_as_timestamps", "1",
     "-f", "s16le",
-    "-ar", "48000",
-    "-ac", "2",
+    "-ar", String(audioSampleRate),
+    "-ac", String(audioChannels),
     "-i", "pipe:4",
     "-map", "0:v",
     "-map", "1:a"
@@ -411,7 +413,11 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
   const cropY = Math.floor((height - cropHeight) / 2);
   const cropFilter = needsCrop ? "crop=" + String(cropWidth) + ":" + String(cropHeight) + ":" + String(cropX) + ":" + String(cropY) + "," : "";
 
-  // Video encoding: VA-API hardware or libx264 software.
+  // Video encoding: VA-API hardware or libx264 software. Keyframes are forced at segment boundaries via -force_key_frames.
+  // The -g 9999 suppresses the encoder's own automatic keyframe insertion (scene changes) — without this, h264_vaapi inserts
+  // extra keyframes every ~1s, creating irregular segment sizes (mix of 2s and 4s segments).
+  const keyframeExpr = "expr:gte(t,n_forced*" + String(segmentDuration) + ")";
+
   if(useVaapi) {
 
     ffmpegArgs.push(
@@ -419,6 +425,8 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
       "-vf", cropFilter + "format=nv12,hwupload",
       "-c:v", "h264_vaapi",
       "-bf", "0",
+      "-g", "9999",
+      "-force_key_frames", keyframeExpr,
       "-r", String(frameRate),
       "-b:v", String(videoBitrate),
       "-maxrate", String(videoBitrate),
@@ -433,6 +441,8 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
       "-c:v", "libx264",
       "-preset", "ultrafast",
       "-bf", "0",
+      "-g", "9999",
+      "-force_key_frames", keyframeExpr,
       "-r", String(frameRate),
       "-b:v", String(videoBitrate),
       "-maxrate", String(videoBitrate),
@@ -443,11 +453,11 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
   ffmpegArgs.push(
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
-    "-af", "aresample=async=1",
+    "-af", "aresample=async=1000:first_pts=0",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-flush_packets", "1",
-    "-max_muxing_queue_size", "1024"
+    "-max_muxing_queue_size", "4096"
   );
 
   if(comment) {

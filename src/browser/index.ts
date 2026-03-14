@@ -877,9 +877,26 @@ async function launchBrowser(): Promise<Browser> {
           // 2. Set remote description (WebRTC's offer)
           await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
 
-          // 3. Create and set answer
+          // 3. Create answer and patch SDP for fullband stereo Opus audio.
+          // Without this, WebRTC negotiates narrowband mono (16kHz/1ch).
           var answer = await entry.pc.createAnswer();
-          await entry.pc.setLocalDescription(answer);
+          var answerSdp = answer.sdp;
+          var opusMatch = answerSdp.match(new RegExp("a=rtpmap:(\\\\d+) opus/"));
+          if (opusMatch) {
+            var pt = opusMatch[1];
+            var stereoParams = "stereo=1;sprop-stereo=1;maxplaybackrate=48000;sprop-maxcapturerate=48000";
+            var fmtpRe = new RegExp("a=fmtp:" + pt + " (.*)");
+            var fmtpMatch = answerSdp.match(fmtpRe);
+            if (fmtpMatch) {
+              answerSdp = answerSdp.replace(fmtpRe, "a=fmtp:" + pt + " " + fmtpMatch[1] + ";" + stereoParams);
+            } else {
+              answerSdp = answerSdp.replace(
+                new RegExp("(a=rtpmap:" + pt + " opus/[^\\\\r\\\\n]+)"),
+                "$1\\r\\na=fmtp:" + pt + " minptime=10;useinbandfec=1;" + stereoParams
+              );
+            }
+          }
+          await entry.pc.setLocalDescription({ type: "answer", sdp: answerSdp });
 
           // 4. Wait for ICE gathering to complete — answer must include candidates
           await new Promise(function(resolve) {

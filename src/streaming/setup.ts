@@ -489,13 +489,14 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
       let useWebRTC = false;
       let webrtcPeer: Nullable<{
+        audioFormat: Promise<{ bitsPerSample: number; channelCount: number; sampleRate: number }>;
         audioStream: Readable;
         candidates: string[];
+        close: () => void;
         firstFrameDimensions: Promise<{ height: number; width: number }>;
         offer: string;
         setAnswer: (answer: string) => Promise<void>;
         videoStream: Readable;
-        close: () => void;
       }> = null;
 
       // Check if the WebRTC monkey-patch is active, then do signaling: WebRTC offers, Chrome answers.
@@ -559,15 +560,16 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
       if(useWebRTC && webrtcPeer) {
 
-        // WebRTC mode: wait for first frame to get actual dimensions, then spawn FFmpeg.
+        // WebRTC mode: wait for first frame and audio format before spawning FFmpeg.
         LOG.info("WebRTC: waiting for first frame dimensions...");
-        const dims = await webrtcPeer.firstFrameDimensions;
+        const [ audioFmt, dims ] = await Promise.all([ webrtcPeer.audioFormat, webrtcPeer.firstFrameDimensions ]);
 
         const viewport = getEffectiveViewport(CONFIG);
 
         LOG.info("WebRTC: frame %dx%d → center crop to %dx%d.", dims.width, dims.height, viewport.width, viewport.height);
         const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
           CONFIG.streaming.frameRate, dims.width, dims.height, viewport.width, viewport.height,
+          audioFmt.sampleRate, audioFmt.channelCount, CONFIG.hls.segmentDuration,
           ffmpegError, streamId, comment);
 
         ffmpegProcess = {

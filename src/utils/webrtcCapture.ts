@@ -16,10 +16,29 @@ const wrtc: any = createRequire(import.meta.url)("@roamhq/wrtc");
 /**
  * Result from creating a WebRTC capture peer.
  */
+/**
+ * Audio format from RTCAudioSink's first callback.
+ */
+export interface WebRTCAudioFormat {
+
+  bitsPerSample: number;
+  channelCount: number;
+  sampleRate: number;
+}
+
 export interface WebRTCCapturePeer {
+
+  // Promise that resolves with the audio format from the first RTCAudioSink callback.
+  audioFormat: Promise<WebRTCAudioFormat>;
+
+  // Readable stream of raw PCM audio.
+  audioStream: Readable;
 
   // Collected ICE candidates (unused with native — SDP includes them).
   candidates: string[];
+
+  // Gracefully close the peer connection.
+  close: () => void;
 
   // Promise that resolves with the first frame's dimensions.
   firstFrameDimensions: Promise<{ height: number; width: number }>;
@@ -30,14 +49,8 @@ export interface WebRTCCapturePeer {
   // Set Chrome's SDP answer.
   setAnswer: (answer: string) => Promise<void>;
 
-  // Readable stream of raw s16le PCM audio.
-  audioStream: Readable;
-
   // Readable stream of raw I420 video frames.
   videoStream: Readable;
-
-  // Gracefully close the peer connection.
-  close: () => void;
 }
 
 /**
@@ -53,6 +66,13 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
   const videoOutput = new PassThrough();
   const audioOutput = new PassThrough();
   let closed = false;
+
+  // Promise for the audio format — setup.ts waits for this before spawning FFmpeg.
+  let resolveAudioFormat: (format: WebRTCAudioFormat) => void;
+  const audioFormat = new Promise<WebRTCAudioFormat>((resolve) => {
+
+    resolveAudioFormat = resolve;
+  });
 
   // Dynamic import for ESM compatibility — @roamhq/wrtc is a CommonJS native addon.
 
@@ -128,12 +148,21 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
       // Use RTCAudioSink to get raw PCM audio samples — synchronized with video via WebRTC.
       const audioSink: any = new wrtc.nonstandard.RTCAudioSink(event.track);
+      let firstAudio = true;
 
-      audioSink.ondata = (evt: { samples: Buffer }): void => {
+      audioSink.ondata = (evt: { bitsPerSample: number; channelCount: number; numberOfFrames: number; sampleRate: number; samples: Buffer }): void => {
 
         if(closed) {
 
           return;
+        }
+
+        if(firstAudio) {
+
+          firstAudio = false;
+          LOG.info("%sWebRTC: audio format %dHz %dch %dbit, %d frames.",
+            logPrefix, evt.sampleRate, evt.channelCount, evt.bitsPerSample, evt.numberOfFrames);
+          resolveAudioFormat({ bitsPerSample: evt.bitsPerSample, channelCount: evt.channelCount, sampleRate: evt.sampleRate });
         }
 
         audioOutput.write(Buffer.from(evt.samples));
@@ -141,7 +170,8 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
     }
   };
 
-  // Create the offer and wait for ICE gathering.
+  // Create the offer and wait for ICE gathering. Audio SDP patching happens on Chrome's answer side (in the monkey-patch)
+  // because the answerer's local description controls encoding behavior — patching the offer alone doesn't change Chrome's encoder.
   const offer = await pc.createOffer();
 
   await pc.setLocalDescription(offer);
@@ -205,6 +235,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   return {
 
+    audioFormat,
     audioStream: audioOutput,
     candidates: [],
     close,
