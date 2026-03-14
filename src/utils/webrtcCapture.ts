@@ -116,6 +116,7 @@ export function createWebRTCCapturePeer(streamId?: string): WebRTCCapturePeer {
 
     LOG.info("%sWebRTC: SDP negotiation complete.", logPrefix);
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return pc.localDescription?.sdp ?? "";
   };
 
