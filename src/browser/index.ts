@@ -890,25 +890,21 @@ async function launchBrowser(): Promise<Browser> {
             if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
           }
 
-          // Intercept encoded video frames from the sender using Insertable Streams.
+          // Intercept encoded video frames using a TransformStream that copies each frame to the WebSocket while passing it through
+          // to the receiver. The receiver MUST get the frames so it sends RTCP feedback — without feedback, the encoder stays at minimum quality.
           var senderStreams = videoSender.createEncodedStreams();
-          var reader = senderStreams.readable.getReader();
-
-          // Pump encoded video frames to WebSocket.
-          (async function pumpVideo() {
-            try {
-              while (true) {
-                var result = await reader.read();
-                if (result.done) break;
-                var frame = result.value;
-                var data = new Uint8Array(frame.data);
-                var msg = new Uint8Array(1 + data.length);
-                msg[0] = 0x01;
-                msg.set(data, 1);
-                if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
-              }
-            } catch(e) { /* stream closed */ }
-          })();
+          var transformer = new TransformStream({
+            transform: function(frame, controller) {
+              var data = new Uint8Array(frame.data);
+              var msg = new Uint8Array(1 + data.length);
+              msg[0] = 0x01;
+              msg.set(data, 1);
+              if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
+              // Pass the frame through to the receiver for RTCP feedback.
+              controller.enqueue(frame);
+            }
+          });
+          senderStreams.readable.pipeThrough(transformer).pipeTo(senderStreams.writable);
 
           // Audio: use MediaRecorder (audio-only) — WebRTC Opus is fine but we need the WebM container for FFmpeg.
           var audioStream = new MediaStream(captureStream.getAudioTracks());
