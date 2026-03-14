@@ -199,7 +199,7 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "warning",
-    "-probesize", "16384",
+    "-f", "mpegts",
     "-i", "pipe:0",
     "-c:v", "copy",
     "-c:a", aacEncoder,
@@ -421,6 +421,100 @@ export function spawnMpegTsRemuxer(onError: (error: Error) => void, streamId?: s
   });
 
   // Kill function for graceful shutdown.
+  const kill = (): void => {
+
+    shuttingDown = true;
+
+    if(!ffmpeg.killed) {
+
+      ffmpeg.kill("SIGTERM");
+    }
+  };
+
+  return {
+
+    kill,
+    process: ffmpeg,
+    stdin: ffmpeg.stdin,
+    stdout: ffmpeg.stdout
+  };
+}
+
+/**
+ * Spawns a lightweight FFmpeg process that remuxes WebM (H264+Opus) to MPEG-TS without re-encoding. This serves as the first stage of a two-stage pipeline:
+ * Chrome's MediaRecorder WebM output is remuxed to MPEG-TS (which has proper frame delimiters, PTS on every frame, and fixed 188-byte packets), then a second
+ * FFmpeg process reads the MPEG-TS stream for encoding/muxing to fMP4. The remux absorbs WebM parsing issues from pipe input and produces a clean streaming format.
+ *
+ * @param onError - Callback invoked when the remuxer exits unexpectedly.
+ * @param streamId - Stream identifier for logging.
+ * @returns FFmpeg process wrapper with stdin (WebM in), stdout (MPEG-TS out), and kill function.
+ */
+export function spawnWebMToMpegTS(onError: (error: Error) => void, streamId?: string): FFmpegProcess {
+
+  const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
+
+  const ffmpegArgs = [
+    "-hide_banner",
+    "-loglevel", "warning",
+    "-probesize", "16384",
+    "-i", "pipe:0",
+    "-c", "copy",
+    "-f", "mpegts",
+    "-flush_packets", "1",
+    "pipe:1"
+  ];
+
+  LOG.info("WebM→MPEG-TS remuxer: using %s (codec copy, ~0 CPU).", ffmpegPath);
+
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+
+    stdio: [ "pipe", "pipe", "pipe" ]
+  });
+
+  const logPrefix = streamId ? "[" + streamId + "] " : "";
+  let shuttingDown = false;
+
+  ffmpeg.stderr.on("data", (data: Buffer) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    const message = data.toString().trim();
+
+    if(message.length > 0) {
+
+      LOG.debug("streaming:ffmpeg", "%sRemuxer: %s", logPrefix, message);
+    }
+  });
+
+  ffmpeg.on("exit", (code, signal) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    if((code !== null) && (code !== 0)) {
+
+      onError(new Error("WebM→MPEG-TS remuxer exited with code " + String(code) + "."));
+    } else if(signal && (signal !== "SIGTERM")) {
+
+      onError(new Error("WebM→MPEG-TS remuxer killed by signal " + signal + "."));
+    }
+  });
+
+  ffmpeg.on("error", (error) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    onError(error);
+  });
+
   const kill = (): void => {
 
     shuttingDown = true;

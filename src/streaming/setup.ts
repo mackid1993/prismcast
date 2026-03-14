@@ -4,7 +4,9 @@
  */
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
-import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext, spawnFFmpeg, startTimer } from "../utils/index.js";
+import {
+  LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext, spawnFFmpeg, spawnWebMToMpegTS, startTimer
+} from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
 import { getNextStreamId, getStreamCount } from "./registry.js";
@@ -470,10 +472,12 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // Store the raw capture stream. This must be destroyed before closing the page.
     rawCaptureStream = stream as unknown as Readable;
 
-    // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
+    // For FFmpeg mode, use a two-stage pipeline: (1) remux WebM→MPEG-TS, (2) read MPEG-TS and produce fMP4.
+    // The MPEG-TS intermediate fixes stuttering caused by FFmpeg's WebM demuxer struggling with pipe input —
+    // MPEG-TS has proper frame delimiters, PTS on every frame, and fixed 188-byte packets designed for streaming.
     if(useFFmpeg) {
 
-      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, (error) => {
+      const ffmpegError = (error: Error): void => {
 
         LOG.error("FFmpeg process error: %s.", formatError(error));
 
@@ -481,9 +485,23 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
           onFFmpegError(error);
         }
-      }, streamId, comment);
+      };
 
-      ffmpegProcess = ffmpeg;
+      // Stage 1: WebM→MPEG-TS remuxer (codec copy, ~0 CPU). Absorbs WebM parsing issues and outputs clean MPEG-TS.
+      const remuxer = spawnWebMToMpegTS(ffmpegError, streamId);
+
+      // Stage 2: MPEG-TS→fMP4 (reads MPEG-TS with proper timestamps, transcodes audio to AAC, outputs fMP4).
+      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, ffmpegError, streamId, comment);
+
+      ffmpegProcess = {
+
+        ...ffmpeg,
+        kill: (): void => {
+
+          ffmpeg.kill();
+          remuxer.kill();
+        }
+      };
 
       // Handle pipe errors on stdout. Stdin errors are handled by pipeline() below.
       ffmpeg.stdout.on("error", (error) => {
@@ -497,6 +515,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
           LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
           ffmpeg.kill();
+          remuxer.kill();
 
           if(onFFmpegError) {
 
@@ -505,20 +524,36 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         }
       });
 
-      // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup. When FFmpeg is killed during tab replacement, pipeline() automatically
-      // destroys the source stream, preventing "write after end" errors that would occur with .pipe().
-      pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+      // Pipeline: Chrome WebM → remuxer stdin → remuxer stdout (MPEG-TS) → FFmpeg stdin → FFmpeg stdout (fMP4).
+      pipeline(stream as unknown as Readable, remuxer.stdin).catch((error: unknown) => {
 
         const errorMessage = formatError(error);
 
-        // EPIPE, "write after end", and "Premature close" errors are expected during cleanup when FFmpeg is killed or the capture stream is destroyed.
         if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
 
           return;
         }
 
-        // Unexpected pipeline errors require cleanup.
-        LOG.error("Capture pipeline error: %s.", errorMessage);
+        LOG.error("Capture→remuxer pipeline error: %s.", errorMessage);
+        remuxer.kill();
+        ffmpeg.kill();
+
+        if(onFFmpegError) {
+
+          onFFmpegError(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+
+      pipeline(remuxer.stdout, ffmpeg.stdin).catch((error: unknown) => {
+
+        const errorMessage = formatError(error);
+
+        if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
+
+          return;
+        }
+
+        LOG.error("Remuxer→FFmpeg pipeline error: %s.", errorMessage);
         ffmpeg.kill();
 
         if(onFFmpegError) {
