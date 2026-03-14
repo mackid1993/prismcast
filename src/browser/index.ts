@@ -880,6 +880,16 @@ async function launchBrowser(): Promise<Browser> {
           var videoTrack = captureStream.getVideoTracks()[0];
           var videoSender = sender.addTrack(videoTrack, captureStream);
 
+          // Force H264 codec. Chrome defaults to VP8 for WebRTC but H264 has better hardware encoding support and
+          // downstream compatibility (HLS/MPEG-TS need H264). Use setCodecPreferences to filter to H264 only.
+          var transceivers = sender.getTransceivers();
+          if (transceivers.length > 0) {
+            var h264Codecs = RTCRtpReceiver.getCapabilities("video").codecs.filter(function(c) {
+              return c.mimeType === "video/H264";
+            });
+            if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
+          }
+
           // Intercept encoded video frames from the sender using Insertable Streams.
           var senderStreams = videoSender.createEncodedStreams();
           var reader = senderStreams.readable.getReader();
