@@ -856,10 +856,17 @@ async function launchBrowser(): Promise<Browser> {
           var entry = activeCaptures.values().next().value;
           if (!entry || !entry.pc || !entry.stream) return null;
 
-          // Match the working werift answer.html example exactly:
-          // 1. Add tracks FIRST (before setRemoteDescription) — just like the example does with getUserMedia
+          // 1. Add tracks FIRST (before setRemoteDescription)
           var videoTrack = entry.stream.getVideoTracks()[0];
           entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
+
+          // Force bitrate, framerate, and resolution on the sender BEFORE negotiation.
+          var params = entry.videoSender.getParameters();
+          if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+          params.encodings[0].maxBitrate = PRISMCAST_BITRATE;
+          params.encodings[0].maxFramerate = PRISMCAST_FRAMERATE;
+          params.encodings[0].scaleResolutionDownBy = 1.0;
+          await entry.videoSender.setParameters(params);
 
           // 2. Set remote description (werift's offer)
           await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
