@@ -844,6 +844,7 @@ async function launchBrowser(): Promise<Browser> {
       const patchViewport = getEffectiveViewport(CONFIG);
       const patchWidth = String(patchViewport.width);
       const patchHeight = String(patchViewport.height);
+      const patchSegmentDuration = String(CONFIG.hls.segmentDuration);
 
       /* eslint-disable no-restricted-syntax */
       const webrtcPatch = `(function() {
@@ -851,6 +852,7 @@ async function launchBrowser(): Promise<Browser> {
         var PRISMCAST_FRAMERATE = ` + patchFrameRate + `;
         var PRISMCAST_WIDTH = ` + patchWidth + `;
         var PRISMCAST_HEIGHT = ` + patchHeight + `;
+        var PRISMCAST_SEGMENT_DURATION = ` + patchSegmentDuration + `;
         var origStopRecording = globalThis.STOP_RECORDING;
         var activeCaptures = new Map();
 
@@ -885,6 +887,14 @@ async function launchBrowser(): Promise<Browser> {
             });
             streams.readable.pipeThrough(h264Transform).pipeTo(streams.writable);
             entry.h264Passthrough = true;
+
+            // Force keyframes at segment boundaries. With -c:v copy, FFmpeg can't insert keyframes —
+            // Chrome's encoder must produce them. generateKeyFrame() requests an IDR from the encoder.
+            entry.keyframeInterval = setInterval(function() {
+              if (entry.videoSender) {
+                entry.videoSender.generateKeyFrame().catch(function() {});
+              }
+            }, PRISMCAST_SEGMENT_DURATION * 1000);
           }
 
           // Force bitrate, framerate, and resolution on the sender.
@@ -1015,6 +1025,7 @@ async function launchBrowser(): Promise<Browser> {
           if (index !== undefined) {
             var entry = activeCaptures.get(index);
             if (entry) {
+              if (entry.keyframeInterval) clearInterval(entry.keyframeInterval);
               try { entry.pc.close(); } catch(e) {}
               try { entry.recorder.stop(); } catch(e) {}
               try { entry.ws.close(); } catch(e) {}
@@ -1023,6 +1034,7 @@ async function launchBrowser(): Promise<Browser> {
             }
           } else {
             activeCaptures.forEach(function(entry, key) {
+              if (entry.keyframeInterval) clearInterval(entry.keyframeInterval);
               try { entry.pc.close(); } catch(e) {}
               try { entry.recorder.stop(); } catch(e) {}
               try { entry.ws.close(); } catch(e) {}
