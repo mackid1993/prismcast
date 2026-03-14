@@ -123,7 +123,7 @@ Section "Screen"
     SubSection "Display"
         Depth  24
         Modes  "${MODE_NAME}"
-        Virtual ${SCREEN_WIDTH} ${SCREEN_HEIGHT}
+        Virtual $((SCREEN_WIDTH + 240)) $((SCREEN_HEIGHT + 360))
     EndSubSection
 EndSection
 
