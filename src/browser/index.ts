@@ -832,10 +832,10 @@ async function launchBrowser(): Promise<Browser> {
 
       // Monkey-patch START_RECORDING to use WebRTC for video encoding instead of MediaRecorder. Chrome uses hardware-accelerated encoding for WebRTC (VA-API on
       // Linux, VideoToolbox on macOS) but software encoding for MediaRecorder. The extension creates an RTCPeerConnection and SDP offer, which Node.js answers using
-      // a werift peer. Chrome sends H264 RTP to the werift peer on localhost — proper RTCP feedback ensures the encoder ramps to full quality.
+      // a WebRTC peer. Chrome sends H264 RTP to the WebRTC peer on localhost — proper RTCP feedback ensures the encoder ramps to full quality.
       //
       // Audio still uses MediaRecorder (audio-only WebM/Opus) sent over the existing WebSocket with 0x02 prefix.
-      // Video goes via WebRTC RTP to werift (not over WebSocket) — werift depacketizes to Annex B H264 for FFmpeg.
+      // Video goes via WebRTC RTP to WebRTC (not over WebSocket) — WebRTC depacketizes to Annex B H264 for FFmpeg.
       //
       // Signaling: The extension stores the SDP offer in globalThis.WEBRTC_OFFER and ICE candidates in globalThis.WEBRTC_ICE_CANDIDATES.
       // Node.js reads them via page.evaluate() and sends the answer back via page.evaluate("WEBRTC_SET_ANSWER(...)").
@@ -847,10 +847,9 @@ async function launchBrowser(): Promise<Browser> {
         var PRISMCAST_BITRATE = ` + patchBitrate + `;
         var PRISMCAST_FRAMERATE = ` + patchFrameRate + `;
         var origStopRecording = globalThis.STOP_RECORDING;
-        var origStopRecording = globalThis.STOP_RECORDING;
         var activeCaptures = new Map();
 
-        // Node.js calls this with werift's SDP offer. Chrome creates an answer and returns it.
+        // Node.js calls this with WebRTC's SDP offer. Chrome creates an answer and returns it.
         // This is called from setup.ts AFTER the capture starts.
         globalThis.WEBRTC_CONNECT = async function(offerSdp) {
           var entry = activeCaptures.values().next().value;
@@ -870,7 +869,7 @@ async function launchBrowser(): Promise<Browser> {
           params.encodings[0].scaleResolutionDownBy = 1.0;
           await entry.videoSender.setParameters(params);
 
-          // 2. Set remote description (werift's offer)
+          // 2. Set remote description (WebRTC's offer)
           await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
 
           // 3. Create and set answer
@@ -900,7 +899,7 @@ async function launchBrowser(): Promise<Browser> {
           return entry.pc.localDescription.sdp;
         };
 
-        // Node.js calls this to add werift's ICE candidates via trickle ICE.
+        // Node.js calls this to add WebRTC's ICE candidates via trickle ICE.
         globalThis.WEBRTC_ADD_CANDIDATE = function(candidateJson) {
           var entry = activeCaptures.values().next().value;
           if (entry && entry.pc) {
@@ -933,8 +932,8 @@ async function launchBrowser(): Promise<Browser> {
           });
           ws.binaryType = "arraybuffer";
 
-          // Create RTCPeerConnection for video — Chrome answers werift's offer, sends H264 RTP.
-          // Track is added later in WEBRTC_CONNECT after receiving werift's offer to ensure proper transceiver matching.
+          // Create RTCPeerConnection for video — Chrome answers WebRTC's offer, sends H264 RTP.
+          // Track is added later in WEBRTC_CONNECT after receiving WebRTC's offer to ensure proper transceiver matching.
           var pc = new RTCPeerConnection();
 
           // Audio: MediaRecorder (audio-only) over WebSocket.
