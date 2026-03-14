@@ -921,6 +921,14 @@ async function launchBrowser(): Promise<Browser> {
           await receiver.setLocalDescription(answer);
           await sender.setRemoteDescription(answer);
 
+          // Force high bitrate and frame rate. Without this, WebRTC's congestion control throttles to near-zero because
+          // the loopback receiver never sends RTCP feedback (no real network = no congestion signals).
+          var params = videoSender.getParameters();
+          if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+          params.encodings[0].maxBitrate = 20000000;
+          params.encodings[0].maxFramerate = 60;
+          await videoSender.setParameters(params);
+
           activeCaptures.set(index, { sender: sender, receiver: receiver, recorder: recorder, stream: captureStream, ws: ws });
         };
 
