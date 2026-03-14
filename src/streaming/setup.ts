@@ -561,6 +561,12 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
             ffmpeg.audioPipe.write(payload);
           }
+        } else if(type === 0xFF) {
+
+          // Diagnostic messages from the WebCodecs extension patch.
+          const diagMsg = payload.toString("utf8");
+
+          LOG.info("%sWebCodecs: %s", streamId ? "[" + streamId + "] " : "", diagMsg);
         }
       });
 

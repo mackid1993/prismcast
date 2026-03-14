@@ -871,30 +871,49 @@ async function launchBrowser(): Promise<Browser> {
           ws.binaryType = "arraybuffer";
 
           var videoTrack = captureStream.getVideoTracks()[0];
-          var processor = new MediaStreamTrackProcessor({ track: videoTrack });
-          var reader = processor.readable.getReader();
 
-          var encoder = new VideoEncoder({
-            error: function(e) { console.error("VideoEncoder error:", e); },
-            output: function(chunk) {
-              var data = new Uint8Array(chunk.byteLength);
-              chunk.copyTo(data);
-              var msg = new Uint8Array(1 + data.length);
-              msg[0] = 0x01;
-              msg.set(data, 1);
-              if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
-            }
-          });
+          function sendDiag(msg) {
+            var encoded = new TextEncoder().encode("DIAG:" + msg);
+            var buf = new Uint8Array(1 + encoded.length);
+            buf[0] = 0xFF;
+            buf.set(encoded, 1);
+            if (ws.readyState === WebSocket.OPEN) ws.send(buf.buffer);
+          }
 
-          encoder.configure({
-            codec: "avc1.42001f",
-            width: width,
-            height: height,
-            framerate: frameRate,
-            bitrate: bitrate,
-            hardwareAcceleration: "prefer-hardware",
-            avc: { format: "annexb" }
-          });
+          var encoder;
+          try {
+            encoder = new VideoEncoder({
+              error: function(e) { sendDiag("encoder-error:" + e.message); },
+              output: function(chunk) {
+                var data = new Uint8Array(chunk.byteLength);
+                chunk.copyTo(data);
+                var msg = new Uint8Array(1 + data.length);
+                msg[0] = 0x01;
+                msg.set(data, 1);
+                if (ws.readyState === WebSocket.OPEN) ws.send(msg.buffer);
+              }
+            });
+            sendDiag("encoder-created");
+          } catch(err) {
+            sendDiag("encoder-create-failed:" + err.message);
+            return;
+          }
+
+          try {
+            encoder.configure({
+              codec: "avc1.42001f",
+              width: width,
+              height: height,
+              framerate: frameRate,
+              bitrate: bitrate,
+              hardwareAcceleration: "prefer-hardware",
+              avc: { format: "annexb" }
+            });
+            sendDiag("encoder-configured:state=" + encoder.state);
+          } catch(err) {
+            sendDiag("encoder-configure-failed:" + err.message);
+            return;
+          }
 
           var audioStream = new MediaStream(captureStream.getAudioTracks());
           var recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm;codecs=opus" });
@@ -908,9 +927,21 @@ async function launchBrowser(): Promise<Browser> {
           };
           recorder.start(20);
 
+          var processor;
+          var reader;
+          try {
+            processor = new MediaStreamTrackProcessor({ track: videoTrack });
+            reader = processor.readable.getReader();
+            sendDiag("processor-created:track=" + videoTrack.readyState + ",enabled=" + videoTrack.enabled);
+          } catch(err) {
+            sendDiag("processor-failed:" + err.message);
+            return;
+          }
+
           var frameCount = 0;
 
           (async function pumpFrames() {
+            sendDiag("pump-started");
             try {
               while (true) {
                 var result = await reader.read();
