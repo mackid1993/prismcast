@@ -217,7 +217,9 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
       "-b:v", String(videoBitrate),
       "-maxrate", String(videoBitrate),
       "-bufsize", String(videoBitrate * 2),
-      "-r", String(frameRate)
+      "-r", String(frameRate),
+      "-g", String(frameRate * 2),
+      "-force_key_frames", "expr:gte(t,n_forced*2)"
     );
   } else {
 
