@@ -2,20 +2,16 @@
  *
  * webrtcCapture.ts: WebRTC-based video capture using native WebRTC bindings for hardware-accelerated H264 encoding.
  */
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
-const wrtc = require("@roamhq/wrtc");
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call,
+   @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any */
 
 import { LOG } from "./logger.js";
 import { PassThrough } from "node:stream";
 import type { Readable } from "node:stream";
+import { createRequire } from "node:module";
 
-// Extract the classes we need from the native WebRTC bindings.
-// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-const NativeRTCPeerConnection = wrtc.RTCPeerConnection as typeof globalThis.RTCPeerConnection;
-// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-const NativeRTCVideoSink = wrtc.nonstandard.RTCVideoSink as new (track: MediaStreamTrack) =>
-{ onframe: ((frame: { data: Buffer; width: number; height: number }) => void) | null; stop: () => void };
+
+const wrtc: any = createRequire(import.meta.url)("@roamhq/wrtc");
 
 /**
  * Result from creating a WebRTC capture peer.
@@ -51,7 +47,9 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
   const videoOutput = new PassThrough();
   let closed = false;
 
-  const pc = new NativeRTCPeerConnection();
+  // Dynamic import for ESM compatibility — @roamhq/wrtc is a CommonJS native addon.
+
+  const pc = new wrtc.RTCPeerConnection() as RTCPeerConnection;
 
   // Add a recvonly transceiver to request video from Chrome.
   pc.addTransceiver("video", { direction: "recvonly" });
@@ -67,7 +65,9 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
       // Use the nonstandard RTCVideoSink to get decoded video frames.
       // Note: for H264 passthrough we'd need RTP access, but RTCVideoSink gives us decoded frames.
       // We'll need to re-encode with FFmpeg, but at least the capture is correct and complete.
-      const sink = new NativeRTCVideoSink(event.track);
+
+
+      const sink: any = new wrtc.nonstandard.RTCVideoSink(event.track);
       let frameCount = 0;
 
       sink.onframe = (frame: { data: Buffer; width: number; height: number }): void => {
