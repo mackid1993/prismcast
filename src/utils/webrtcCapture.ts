@@ -52,6 +52,10 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
       audio: [],
       video: [useH264()]
+    },
+    iceInterfaceAddresses: {
+
+      udp4: "0.0.0.0"
     }
   });
 
