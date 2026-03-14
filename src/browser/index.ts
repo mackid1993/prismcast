@@ -900,8 +900,11 @@ async function launchBrowser(): Promise<Browser> {
           }
 
           // Test which codec configurations are supported before configuring.
-          var codecs = ["avc1.640033", "avc1.640028", "avc1.42e01e", "avc1.420028"];
+          var codecs = ["avc1.640033", "avc1.640028", "avc1.420028"];
           var selectedCodec = null;
+          var hwMode = "no-preference";
+
+          // Try hardware-accelerated encoding first.
           for (var ci = 0; ci < codecs.length; ci++) {
             try {
               var testResult = await VideoEncoder.isConfigSupported({
@@ -909,14 +912,17 @@ async function launchBrowser(): Promise<Browser> {
                 framerate: frameRate, bitrate: bitrate,
                 hardwareAcceleration: "prefer-hardware"
               });
-              sendDiag("codec-test:" + codecs[ci] + "=" + (testResult.supported ? "yes" : "no"));
-              if (testResult.supported && !selectedCodec) selectedCodec = codecs[ci];
+              sendDiag("codec-test-hw:" + codecs[ci] + "=" + (testResult.supported ? "yes" : "no"));
+              if (testResult.supported && !selectedCodec) {
+                selectedCodec = codecs[ci];
+                hwMode = "prefer-hardware";
+              }
             } catch(err) {
-              sendDiag("codec-test:" + codecs[ci] + "=error:" + err.message);
+              sendDiag("codec-test-hw:" + codecs[ci] + "=error:" + err.message);
             }
           }
 
-          // Also test software fallback.
+          // Fall back to software encoding if no hardware codec found.
           if (!selectedCodec) {
             for (var si = 0; si < codecs.length; si++) {
               try {
@@ -938,8 +944,7 @@ async function launchBrowser(): Promise<Browser> {
             return;
           }
 
-          var hwMode = selectedCodec ? "prefer-hardware" : "no-preference";
-          sendDiag("selected-codec:" + selectedCodec + ",hw=" + hwMode);
+          sendDiag("selected:" + selectedCodec + ",hw=" + hwMode);
 
           try {
             encoder.configure({
