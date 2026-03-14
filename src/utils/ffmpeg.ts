@@ -472,11 +472,16 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     stdio: [ "ignore", "pipe", "pipe", "pipe", "pipe" ]
   });
 
+  // Extract streams — guaranteed non-null because stdio is all "pipe".
+  const ffmpegStderr = ffmpeg.stderr!;
+  const ffmpegStdout = ffmpeg.stdout!;
+  const videoPipe = ffmpeg.stdio[3] as Writable;
+  const audioPipe = ffmpeg.stdio[4] as Writable;
+
   const logPrefix = streamId ? "[" + streamId + "] " : "";
   let shuttingDown = false;
 
-  // stderr is non-null since stdio[2] is "pipe".
-  ffmpeg.stderr!.on("data", (data: Buffer) => {
+  ffmpegStderr.on("data", (data: Buffer) => {
 
     if(shuttingDown) {
 
@@ -535,16 +540,13 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     }
   };
 
-  const videoPipe = ffmpeg.stdio[3] as Writable;
-  const audioPipe = ffmpeg.stdio[4] as Writable;
-
   return {
 
     audioPipe,
     kill,
     process: ffmpeg,
     stdin: ffmpeg.stdin as unknown as Writable,
-    stdout: ffmpeg.stdout!,
+    stdout: ffmpegStdout,
     videoPipe
   };
 }
@@ -607,10 +609,16 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number, frameRate: numb
     stdio: [ "ignore", "pipe", "pipe", "pipe", "pipe" ]
   });
 
+  // Extract streams — guaranteed non-null because stdio is all "pipe".
+  const ffmpegStderr = ffmpeg.stderr!;
+  const ffmpegStdout = ffmpeg.stdout!;
+  const videoPipe = ffmpeg.stdio[3] as Writable;
+  const audioPipe = ffmpeg.stdio[4] as Writable;
+
   const logPrefix = streamId ? "[" + streamId + "] " : "";
   let shuttingDown = false;
 
-  ffmpeg.stderr!.on("data", (data: Buffer) => {
+  ffmpegStderr.on("data", (data: Buffer) => {
 
     if(shuttingDown) {
 
@@ -668,16 +676,13 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number, frameRate: numb
     }
   };
 
-  const videoPipe = ffmpeg.stdio[3] as Writable;
-  const audioPipe = ffmpeg.stdio[4] as Writable;
-
   return {
 
     audioPipe,
     kill,
     process: ffmpeg,
     stdin: ffmpeg.stdin as unknown as Writable,
-    stdout: ffmpeg.stdout!,
+    stdout: ffmpegStdout,
     videoPipe
   };
 }
