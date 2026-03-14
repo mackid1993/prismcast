@@ -6,7 +6,7 @@ import type { Browser, LaunchOptions, Page } from "puppeteer-core";
 import { LOG, evaluateWithAbort, formatError, startTimer } from "../utils/index.js";
 import { getAllStreams, getStreamCount } from "../streaming/registry.js";
 import { getChromeDataDir, getDataDir, getExtensionDir } from "../config/paths.js";
-import { getEffectivePreset, getPresetViewport } from "../config/presets.js";
+import { getEffectivePreset, getEffectiveViewport, getPresetViewport } from "../config/presets.js";
 import { getExtensionPage, getStream, launch } from "puppeteer-stream";
 import { resizeAndMinimizeWindow, unminimizeWindow } from "./cdp.js";
 import { setBrowserChrome, setMaxSupportedViewport } from "./display.js";
@@ -841,11 +841,16 @@ async function launchBrowser(): Promise<Browser> {
       // Node.js reads them via page.evaluate() and sends the answer back via page.evaluate("WEBRTC_SET_ANSWER(...)").
       const patchBitrate = String(CONFIG.streaming.videoBitsPerSecond);
       const patchFrameRate = String(CONFIG.streaming.frameRate);
+      const patchViewport = getEffectiveViewport(CONFIG);
+      const patchWidth = String(patchViewport.width);
+      const patchHeight = String(patchViewport.height);
 
       /* eslint-disable no-restricted-syntax */
       const webrtcPatch = `(function() {
         var PRISMCAST_BITRATE = ` + patchBitrate + `;
         var PRISMCAST_FRAMERATE = ` + patchFrameRate + `;
+        var PRISMCAST_WIDTH = ` + patchWidth + `;
+        var PRISMCAST_HEIGHT = ` + patchHeight + `;
         var origStopRecording = globalThis.STOP_RECORDING;
         var activeCaptures = new Map();
 
@@ -915,7 +920,20 @@ async function launchBrowser(): Promise<Browser> {
           var port = window.location.hash.substring(1);
 
           var captureStream = await new Promise(function(resolve, reject) {
-            chrome.tabCapture.capture({ audio: true, video: true }, function(stream) {
+            chrome.tabCapture.capture({
+              audio: true,
+              video: true,
+              videoConstraints: {
+                mandatory: {
+                  maxFrameRate: PRISMCAST_FRAMERATE,
+                  maxHeight: PRISMCAST_HEIGHT,
+                  maxWidth: PRISMCAST_WIDTH,
+                  minFrameRate: PRISMCAST_FRAMERATE,
+                  minHeight: PRISMCAST_HEIGHT,
+                  minWidth: PRISMCAST_WIDTH
+                }
+              }
+            }, function(stream) {
               if (!stream || chrome.runtime.lastError) {
                 reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || "tabCapture failed"));
                 return;
