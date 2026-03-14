@@ -398,6 +398,8 @@ export function spawnWebRTCFFmpeg(audioBitrate: number, videoBitrate: number, fr
     "-map", "1:a"
   ];
 
+  LOG.info("WebRTC FFmpeg: using %s (%s).", ffmpegPath, useVaapi ? "h264_vaapi hardware" : "libx264 software");
+
   // Crop to viewport if frame is larger than viewport, then encode.
   const needsCrop = (width !== cropWidth) || (height !== cropHeight);
   const cropFilter = needsCrop ? "crop=" + String(cropWidth) + ":" + String(cropHeight) + ":0:0," : "";
