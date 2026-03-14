@@ -97,8 +97,51 @@ RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firm
     i965-va-driver \
     intel-media-va-driver \
     vainfo \
-    # System FFmpeg with VA-API support for hardware video re-encoding. The bundled ffmpeg-for-homebridge doesn't have VA-API compiled in.
+    # System FFmpeg with VA-API support for hardware video encoding.
     ffmpeg \
+    # PulseAudio for audio capture by gpu-screen-recorder.
+    pulseaudio \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build gpu-screen-recorder from source for hardware-accelerated screen capture. This bypasses Chrome's MediaRecorder entirely — captures directly from the GPU
+# framebuffer via VA-API at exact constant frame rate with audio from PulseAudio. Only used when /dev/dri is available; falls back to MediaRecorder otherwise.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    meson \
+    ninja-build \
+    pkg-config \
+    git \
+    gcc \
+    g++ \
+    libx11-dev \
+    libxcomposite-dev \
+    libxrandr-dev \
+    libxfixes-dev \
+    libxdamage-dev \
+    libdrm-dev \
+    libva-dev \
+    libcap-dev \
+    libpulse-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libswresample-dev \
+    libavfilter-dev \
+    libdbus-1-dev \
+    libglvnd-dev \
+    vulkan-headers \
+    linux-libc-dev \
+    && git clone --depth 1 https://git.dec05eba.com/gpu-screen-recorder /tmp/gpu-screen-recorder \
+    && cd /tmp/gpu-screen-recorder \
+    && meson setup build -Dportal=false -Dsystemd=false \
+    && ninja -C build \
+    && ninja -C build install \
+    && rm -rf /tmp/gpu-screen-recorder \
+    && apt-get purge -y meson ninja-build pkg-config git gcc g++ \
+       libx11-dev libxcomposite-dev libxrandr-dev libxfixes-dev libxdamage-dev \
+       libdrm-dev libva-dev libcap-dev libpulse-dev libavcodec-dev libavformat-dev \
+       libavutil-dev libswresample-dev libavfilter-dev libdbus-1-dev libglvnd-dev \
+       vulkan-headers linux-libc-dev \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PrismCast. When BUILD_FROM_SOURCE is set (manual/dev builds), build from the repository source. Otherwise, install the published package from npm (release

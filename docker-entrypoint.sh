@@ -124,6 +124,16 @@ else
   echo "Warning: Could not set ${TARGET_FPS}Hz refresh rate (cvt not available)."
 fi
 
+# Start PulseAudio for audio capture by gpu-screen-recorder. Runs in system-wide mode since we're root in the container.
+if command -v pulseaudio > /dev/null 2>&1; then
+  echo "Starting PulseAudio..."
+  pulseaudio --system --disallow-exit --disallow-module-loading=0 --daemonize 2>/dev/null || true
+  # Create a virtual sink for Chrome's audio output that gpu-screen-recorder can capture.
+  pactl load-module module-null-sink sink_name=capture sink_properties=device.description="CaptureAudio" 2>/dev/null || true
+  pactl set-default-sink capture 2>/dev/null || true
+  echo "PulseAudio started."
+fi
+
 # Start x11vnc (VNC server for the virtual display).
 echo "Starting x11vnc..."
 if [ -f /root/.vnc/passwd ]; then
