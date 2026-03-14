@@ -238,11 +238,10 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
         }
       }
 
-      // Add H264 PT to front of m-line so Chrome prefers it.
-      offerSdp = offerSdp.replace(videoMLine[0], videoMLine[1] + h264PT + " " + videoMLine[2].trim());
-
-      // Insert H264 rtpmap/fmtp/rtcp-fb lines after the video m-line. Constrained Baseline Profile (42e01f)
-      // is the most widely supported H264 profile in WebRTC.
+      // Build new m-line with H264 PT first, followed by H264 rtpmap/fmtp/rtcp-fb attributes.
+      // Constrained Baseline Profile (42e01f) is the most widely supported H264 profile in WebRTC.
+      // Must be a single replace — the original m-line text can only be matched once.
+      const newMLine = videoMLine[1] + h264PT + " " + videoMLine[2].trim();
       const h264Attrs = [
         "a=rtpmap:" + h264PT + " H264/90000",
         "a=fmtp:" + h264PT + " level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
@@ -252,8 +251,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
         "a=rtcp-fb:" + h264PT + " transport-cc"
       ].join("\r\n");
 
-      // Insert after the m=video line.
-      offerSdp = offerSdp.replace(videoMLine[0], videoMLine[0] + "\r\n" + h264Attrs);
+      offerSdp = offerSdp.replace(videoMLine[0], newMLine + "\r\n" + h264Attrs);
 
       LOG.info("%sWebRTC: injected H264 into SDP offer (PT %s).", logPrefix, h264PT);
     }
