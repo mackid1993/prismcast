@@ -856,9 +856,11 @@ async function launchBrowser(): Promise<Browser> {
           var entry = activeCaptures.values().next().value;
           if (!entry || !entry.pc || !entry.stream) return null;
 
-          // 1. Add tracks FIRST (before setRemoteDescription)
+          // 1. Add BOTH video and audio tracks FIRST (before setRemoteDescription)
           var videoTrack = entry.stream.getVideoTracks()[0];
+          var audioTrack = entry.stream.getAudioTracks()[0];
           entry.videoSender = entry.pc.addTrack(videoTrack, entry.stream);
+          if (audioTrack) entry.pc.addTrack(audioTrack, entry.stream);
 
           // Force bitrate, framerate, and resolution on the sender BEFORE negotiation.
           var params = entry.videoSender.getParameters();
