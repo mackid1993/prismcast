@@ -16,12 +16,14 @@ import { CONFIG } from "../config/index.js";
 import type { FFmpegProcess } from "../utils/index.js";
 import type { MonitorStreamInfo } from "./monitor.js";
 import type { Readable } from "node:stream";
+import { existsSync } from "node:fs";
 import { getEffectiveViewport } from "../config/presets.js";
 import { getProviderDisplayName } from "../config/providers.js";
 import { isChannelSelectionProfile } from "../types/index.js";
 import { monitorPlaybackHealth } from "./monitor.js";
 import { pipeline } from "node:stream/promises";
 import { resizeAndMinimizeWindow } from "../browser/cdp.js";
+import { spawn } from "node:child_process";
 
 /* This module contains the common stream setup logic for HLS streaming. The core logic is split into two functions:
  *
@@ -474,89 +476,261 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
-      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
+      // In Docker with GPU, use gpu-screen-recorder for hardware-accelerated capture directly from the GPU framebuffer. This bypasses Chrome's MediaRecorder entirely
+      // — no dropped frames, exact constant frame rate, hardware encoding via VA-API. Audio is captured from PulseAudio. puppeteer-stream still runs for browser
+      // control but its capture output is ignored. Falls back to standard MediaRecorder pipeline when gpu-screen-recorder is not available.
+      const useGpuCapture = (process.env.PRISMCAST_CONTAINER === "1") && existsSync("/usr/local/bin/gpu-screen-recorder");
 
-        LOG.error("FFmpeg process error: %s.", formatError(error));
+      if(useGpuCapture) {
 
-        if(onFFmpegError) {
+        const display = process.env.DISPLAY ?? ":99";
+        const viewport = getEffectiveViewport(CONFIG);
+        const gsrFrameRate = CONFIG.streaming.frameRate;
 
-          onFFmpegError(error);
-        }
-      }, streamId, comment);
+        LOG.info("Starting gpu-screen-recorder capture (%dx%d@%dfps).", viewport.width, viewport.height, gsrFrameRate);
 
-      ffmpegProcess = ffmpeg;
+        // Spawn gpu-screen-recorder to capture the screen + audio. Outputs MPEG-TS to stdout.
+        // -w screen: capture the full display (Chrome is the only app on Xvfb)
+        // -f: frame rate
+        // -a: PulseAudio monitor source (captures Chrome's audio output)
+        // -k h264: H264 codec (VA-API hardware encoding when available)
+        // -ac aac: AAC audio codec
+        // -q very_high: high quality
+        // -cr: crop region (x,y,width,height) to capture only the viewport area
+        // -o -: output to stdout
+        const gsrArgs = [
+          "-w", "screen",
+          "-f", String(gsrFrameRate),
+          "-a", "capture.monitor",
+          "-k", "h264",
+          "-ac", "aac",
+          "-q", "very_high",
+          "-o", "-"
+        ];
 
-      // Handle pipe errors on stdout. Stdin errors are handled by pipeline() below.
-      ffmpeg.stdout.on("error", (error) => {
+        const gsr = spawn("gpu-screen-recorder", gsrArgs, {
 
-        const errorMessage = formatError(error);
+          env: { ...process.env, DISPLAY: display },
+          stdio: [ "ignore", "pipe", "pipe" ]
+        });
 
-        if(errorMessage.includes("EPIPE")) {
+        // Log gpu-screen-recorder stderr.
+        gsr.stderr.on("data", (data: Buffer) => {
 
-          LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
-        } else {
+          const msg = data.toString().trim();
 
-          LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
+          if(msg.length > 0) {
+
+            LOG.debug("streaming:gsr", "%sgpu-screen-recorder: %s", streamId ? "[" + streamId + "] " : "", msg);
+          }
+        });
+
+        // Pipe gpu-screen-recorder output through FFmpeg to remux to fMP4 for the segmenter.
+        const ffmpegPath = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : "ffmpeg";
+
+        const remuxArgs = [
+          "-hide_banner",
+          "-loglevel", "info",
+          "-progress", "pipe:2",
+          "-i", "pipe:0",
+          "-c:v", "copy",
+          "-c:a", "copy",
+          "-f", "mp4",
+          "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+          "-flush_packets", "1",
+          "-max_muxing_queue_size", "1024",
+          "pipe:1"
+        ];
+
+        const remux = spawn(ffmpegPath, remuxArgs, {
+
+          stdio: [ "pipe", "pipe", "pipe" ]
+        });
+
+        // Pipe gpu-screen-recorder stdout → FFmpeg remux stdin → fMP4 output.
+        gsr.stdout.pipe(remux.stdin);
+
+        // Handle FFmpeg remux errors.
+        let remuxShuttingDown = false;
+
+        remux.stderr.on("data", (data: Buffer) => {
+
+          if(remuxShuttingDown) {
+
+            return;
+          }
+
+          const message = data.toString().trim();
+          const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+
+          for(const line of message.split("\n")) {
+
+            const trimmed = line.trim();
+
+            if((trimmed.length === 0) || noisePatterns.some((p) => trimmed.includes(p))) {
+
+              continue;
+            }
+
+            LOG.debug("streaming:ffmpeg", "%sRemux: %s", streamId ? "[" + streamId + "] " : "", trimmed);
+          }
+        });
+
+        remux.on("exit", (code, signal) => {
+
+          if(remuxShuttingDown || (signal === "SIGTERM")) {
+
+            return;
+          }
+
+          if((code !== null) && (code !== 0)) {
+
+            LOG.error("FFmpeg remux exited with code %d.", code);
+
+            if(onFFmpegError) {
+
+              onFFmpegError(new Error("FFmpeg remux exited with code " + String(code) + "."));
+            }
+          }
+        });
+
+        remux.stdout.on("error", (error) => {
+
+          const errorMessage = formatError(error);
+
+          if(!errorMessage.includes("EPIPE")) {
+
+            LOG.error("FFmpeg remux stdout error: %s.", errorMessage);
+          }
+        });
+
+        // Handle gpu-screen-recorder exit.
+        gsr.on("exit", (code, signal) => {
+
+          if(signal === "SIGTERM") {
+
+            return;
+          }
+
+          if((code !== null) && (code !== 0)) {
+
+            LOG.error("gpu-screen-recorder exited with code %d.", code);
+
+            if(onFFmpegError) {
+
+              onFFmpegError(new Error("gpu-screen-recorder exited with code " + String(code) + "."));
+            }
+          }
+        });
+
+        // Store for cleanup. Create a wrapper FFmpegProcess that kills both gsr and remux.
+        ffmpegProcess = {
+
+          kill: (): void => {
+
+            remuxShuttingDown = true;
+
+            if(!gsr.killed) {
+
+              gsr.kill("SIGTERM");
+            }
+
+            if(!remux.killed) {
+
+              remux.kill("SIGTERM");
+            }
+          },
+          process: remux,
+          stdin: remux.stdin,
+          stdout: remux.stdout
+        };
+
+        outputStream = remux.stdout;
+      } else {
+
+        // Standard MediaRecorder pipeline (macOS / bare metal / no GPU).
+        const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
+          CONFIG.streaming.frameRate, (error) => {
+
+            LOG.error("FFmpeg process error: %s.", formatError(error));
+
+            if(onFFmpegError) {
+
+              onFFmpegError(error);
+            }
+          }, streamId, comment);
+
+        ffmpegProcess = ffmpeg;
+
+        ffmpeg.stdout.on("error", (error) => {
+
+          const errorMessage = formatError(error);
+
+          if(errorMessage.includes("EPIPE")) {
+
+            LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
+          } else {
+
+            LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
+            ffmpeg.kill();
+
+            if(onFFmpegError) {
+
+              onFFmpegError(error);
+            }
+          }
+        });
+
+        // Diagnostic logging for capture stream health.
+        let captureBytes = 0;
+        let captureChunks = 0;
+        const captureLogInterval = setInterval(() => {
+
+          if(captureBytes > 0) {
+
+            const kbps = Math.round((captureBytes * 8) / 5000);
+
+            LOG.info("%sCapture: %d kbps, %d chunks/5s (avg %d bytes/chunk).",
+              streamId ? "[" + streamId + "] " : "", kbps, captureChunks,
+              captureChunks > 0 ? Math.round(captureBytes / captureChunks) : 0);
+            captureBytes = 0;
+            captureChunks = 0;
+          }
+        }, 5000);
+
+        captureLogInterval.unref();
+
+        rawCaptureStream.on("data", (chunk: Buffer) => {
+
+          captureBytes += chunk.length;
+          captureChunks++;
+        });
+
+        rawCaptureStream.on("close", () => {
+
+          clearInterval(captureLogInterval);
+        });
+
+        pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+
+          const errorMessage = formatError(error);
+
+          if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
+
+            return;
+          }
+
+          LOG.error("Capture pipeline error: %s.", errorMessage);
           ffmpeg.kill();
 
           if(onFFmpegError) {
 
-            onFFmpegError(error);
+            onFFmpegError(error instanceof Error ? error : new Error(String(error)));
           }
-        }
-      });
+        });
 
-      // Diagnostic logging for capture stream health.
-      let captureBytes = 0;
-      let captureChunks = 0;
-      const captureLogInterval = setInterval(() => {
-
-        if(captureBytes > 0) {
-
-          const kbps = Math.round((captureBytes * 8) / 5000);
-
-          LOG.info("%sCapture: %d kbps, %d chunks/5s (avg %d bytes/chunk).",
-            streamId ? "[" + streamId + "] " : "", kbps, captureChunks,
-            captureChunks > 0 ? Math.round(captureBytes / captureChunks) : 0);
-          captureBytes = 0;
-          captureChunks = 0;
-        }
-      }, 5000);
-
-      captureLogInterval.unref();
-
-      rawCaptureStream.on("data", (chunk: Buffer) => {
-
-        captureBytes += chunk.length;
-        captureChunks++;
-      });
-
-      rawCaptureStream.on("close", () => {
-
-        clearInterval(captureLogInterval);
-      });
-
-      // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup.
-      pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
-
-        const errorMessage = formatError(error);
-
-        if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
-
-          return;
-        }
-
-        LOG.error("Capture pipeline error: %s.", errorMessage);
-        ffmpeg.kill();
-
-        if(onFFmpegError) {
-
-          onFFmpegError(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
-
-      // Use FFmpeg's stdout (fMP4 output) as the output stream for segmentation.
-      outputStream = ffmpeg.stdout;
+        outputStream = ffmpeg.stdout;
+      }
     } else {
 
       // Native fMP4 mode: Use the raw capture stream directly. In this mode, rawCaptureStream and outputStream are the same object.
