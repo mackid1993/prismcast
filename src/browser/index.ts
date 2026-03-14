@@ -908,12 +908,18 @@ async function launchBrowser(): Promise<Browser> {
           };
           recorder.start(20);
 
+          var frameCount = 0;
+
           (async function pumpFrames() {
             try {
               while (true) {
                 var result = await reader.read();
                 if (result.done || !result.value) break;
-                if (encoder.state === "configured") encoder.encode(result.value);
+                if (encoder.state === "configured") {
+                  var isKeyFrame = (frameCount % 120) === 0;
+                  encoder.encode(result.value, { keyFrame: isKeyFrame });
+                  frameCount++;
+                }
                 result.value.close();
               }
             } catch(e) { /* stream closed, expected during cleanup */ }
