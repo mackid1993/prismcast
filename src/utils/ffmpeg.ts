@@ -155,6 +155,9 @@ export async function resolveFFmpegPath(): Promise<string | undefined> {
  */
 export interface FFmpegProcess {
 
+  // Writable stream for piping audio to FFmpeg. Only present in x11grab mode.
+  audioPipe?: Writable;
+
   // Function to gracefully terminate the FFmpeg process.
   kill: () => void;
 
@@ -353,6 +356,197 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
     process: ffmpeg,
     stdin: ffmpeg.stdin,
     stdout: ffmpeg.stdout
+  };
+}
+
+/**
+ * Spawns an FFmpeg process that captures video directly from the X11 display via x11grab and receives audio via pipe. This bypasses Chrome's MediaRecorder entirely
+ * for video — x11grab reads pixels from the Xvfb framebuffer at an exact constant frame rate, then h264_vaapi hardware-encodes them. Audio comes from puppeteer-stream's
+ * MediaRecorder (audio-only WebM/Opus) piped to fd 3. The result is perfectly constant frame rate video with no dropped or duplicated frames.
+ *
+ * @param display - X11 display identifier (e.g., ":99").
+ * @param width - Capture width in pixels.
+ * @param height - Capture height in pixels.
+ * @param frameRate - Target frame rate (e.g., 60).
+ * @param videoBitrate - Video bitrate in bits per second.
+ * @param audioBitrate - Audio bitrate in bits per second.
+ * @param onError - Callback invoked when FFmpeg exits unexpectedly.
+ * @param streamId - Stream identifier for logging.
+ * @param comment - Optional metadata comment.
+ * @returns FFmpeg process with audioPipe (fd 3) for audio input, stdout for fMP4 output.
+ */
+export function spawnX11GrabFFmpeg(display: string, width: number, height: number, frameRate: number,
+  videoBitrate: number, audioBitrate: number, onError: (error: Error) => void, streamId?: string,
+  comment?: string): FFmpegProcess {
+
+  // Use system FFmpeg for VA-API support. Fall back to bundled FFmpeg with software encoding.
+  const useVaapi = existsSync("/dev/dri/renderD128") && existsSync("/usr/bin/ffmpeg");
+  const ffmpegPath = useVaapi ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
+
+  LOG.info("x11grab using %s (VA-API: %s).", ffmpegPath, useVaapi ? "yes" : "no");
+  const aacEncoder = "aac";
+
+  const ffmpegArgs = [
+    "-hide_banner",
+    "-loglevel", "info",
+    "-progress", "pipe:2",
+    // Input 0: x11grab video from the virtual display at exact constant frame rate.
+    "-f", "x11grab",
+    "-framerate", String(frameRate),
+    "-video_size", String(width) + "x" + String(height),
+    "-i", display,
+    // Input 1: audio-only WebM/Opus from puppeteer-stream via fd 3.
+    "-f", "webm",
+    "-i", "pipe:3"
+  ];
+
+  // Video encoding.
+  if(useVaapi) {
+
+    ffmpegArgs.push(
+      "-vaapi_device", "/dev/dri/renderD128",
+      "-vf", "format=nv12,hwupload",
+      "-c:v", "h264_vaapi",
+      "-bf", "0",
+      "-b:v", String(videoBitrate),
+      "-maxrate", String(videoBitrate),
+      "-bufsize", String(videoBitrate * 2)
+    );
+  } else {
+
+    ffmpegArgs.push(
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-bf", "0",
+      "-b:v", String(videoBitrate),
+      "-maxrate", String(videoBitrate),
+      "-bufsize", String(videoBitrate * 2)
+    );
+  }
+
+  // Audio encoding + output.
+  ffmpegArgs.push(
+    "-c:a", aacEncoder,
+    "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1",
+    "-f", "mp4",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-flush_packets", "1",
+    "-max_muxing_queue_size", "1024"
+  );
+
+  if(comment) {
+
+    ffmpegArgs.push("-metadata", "comment=PrismCast - " + comment);
+  }
+
+  ffmpegArgs.push("pipe:1");
+
+  // fd 3 = audio pipe input.
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+
+    stdio: [ "ignore", "pipe", "pipe", "pipe" ]
+  });
+
+  const logPrefix = streamId ? "[" + streamId + "] " : "";
+  let shuttingDown = false;
+  let lastProgressLog = Date.now();
+  const progressStats: Record<string, string> = {};
+
+  // Log FFmpeg stderr output. stderr is guaranteed non-null since stdio[2] is "pipe".
+  ffmpeg.stderr!.on("data", (data: Buffer) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    const message = data.toString().trim();
+
+    for(const line of message.split("\n")) {
+
+      const eqIdx = line.indexOf("=");
+
+      if(eqIdx > 0) {
+
+        progressStats[line.substring(0, eqIdx).trim()] = line.substring(eqIdx + 1).trim();
+      }
+    }
+
+    const now = Date.now();
+
+    if((now - lastProgressLog) >= 5000) {
+
+      const frame = progressStats.frame || "?";
+      const fps = progressStats.fps || "?";
+      const speed = progressStats.speed || "?";
+      const bitrate = progressStats.bitrate || "?";
+      const drop = progressStats.drop_frames || "0";
+
+      LOG.info("%sx11grab: frame=%s fps=%s speed=%s bitrate=%s dropped=%s", logPrefix, frame, fps, speed, bitrate, drop);
+      lastProgressLog = now;
+    }
+
+    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+
+    for(const line of message.split("\n")) {
+
+      const trimmed = line.trim();
+
+      if((trimmed.length === 0) || trimmed.includes("=") || noisePatterns.some((p) => trimmed.includes(p))) {
+
+        continue;
+      }
+
+      LOG.debug("streaming:ffmpeg", "%sx11grab: %s", logPrefix, trimmed);
+    }
+  });
+
+  ffmpeg.on("exit", (code, signal) => {
+
+    if(shuttingDown || (signal === "SIGTERM")) {
+
+      return;
+    }
+
+    if((code !== null) && (code !== 0)) {
+
+      onError(new Error("x11grab FFmpeg exited with code " + String(code) + "."));
+    } else if(signal) {
+
+      onError(new Error("x11grab FFmpeg killed by signal " + signal + "."));
+    }
+  });
+
+  ffmpeg.on("error", (error) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    onError(error);
+  });
+
+  const kill = (): void => {
+
+    shuttingDown = true;
+
+    if(!ffmpeg.killed) {
+
+      ffmpeg.kill("SIGTERM");
+    }
+  };
+
+  const audioPipe = ffmpeg.stdio[3] as Writable;
+
+  return {
+
+    audioPipe,
+    kill,
+    process: ffmpeg,
+    stdin: ffmpeg.stdin as unknown as Writable,
+    stdout: ffmpeg.stdout!
   };
 }
 

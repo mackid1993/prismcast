@@ -5,7 +5,7 @@
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
 import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext,
-  spawnFFmpeg, startTimer } from "../utils/index.js";
+  spawnFFmpeg, spawnX11GrabFFmpeg, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
 import { getNextStreamId, getStreamCount } from "./registry.js";
@@ -474,89 +474,123 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
-      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
+      // In Docker containers, use x11grab to capture video directly from the Xvfb display at an exact constant frame rate, bypassing Chrome's MediaRecorder entirely
+      // for video. MediaRecorder on Linux drops frames due to its software encoder — x11grab reads pixels from the framebuffer at precisely the target rate. Audio still
+      // comes from puppeteer-stream's MediaRecorder (audio-only) piped to FFmpeg. On macOS/bare metal, the standard MediaRecorder pipeline is used unchanged.
+      const useX11Grab = process.env.PRISMCAST_CONTAINER === "1";
 
-        LOG.error("FFmpeg process error: %s.", formatError(error));
+      if(useX11Grab) {
 
-        if(onFFmpegError) {
+        const display = process.env.DISPLAY ?? ":99";
+        const viewport = getEffectiveViewport(CONFIG);
 
-          onFFmpegError(error);
-        }
-      }, streamId, comment);
+        const ffmpeg = spawnX11GrabFFmpeg(display, viewport.width, viewport.height, CONFIG.streaming.frameRate,
+          CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.audioBitsPerSecond, (error) => {
 
-      ffmpegProcess = ffmpeg;
+            LOG.error("x11grab FFmpeg error: %s.", formatError(error));
 
-      // Handle pipe errors on stdout. Stdin errors are handled by pipeline() below.
-      ffmpeg.stdout.on("error", (error) => {
+            if(onFFmpegError) {
 
-        const errorMessage = formatError(error);
+              onFFmpegError(error);
+            }
+          }, streamId, comment);
 
-        if(errorMessage.includes("EPIPE")) {
+        ffmpegProcess = ffmpeg;
 
-          LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
-        } else {
+        // Handle pipe errors on stdout.
+        ffmpeg.stdout.on("error", (error) => {
 
-          LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
-          ffmpeg.kill();
+          const errorMessage = formatError(error);
+
+          if(errorMessage.includes("EPIPE")) {
+
+            LOG.debug("streaming:ffmpeg", "x11grab stdout pipe closed: %s.", errorMessage);
+          } else {
+
+            LOG.error("x11grab stdout pipe error: %s.", errorMessage);
+            ffmpeg.kill();
+
+            if(onFFmpegError) {
+
+              onFFmpegError(error);
+            }
+          }
+        });
+
+        // Pipe the capture stream (audio-only WebM from MediaRecorder) to FFmpeg's audio pipe (fd 3).
+        rawCaptureStream.on("data", (chunk: Buffer) => {
+
+          if(ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.write(chunk);
+          }
+        });
+
+        rawCaptureStream.on("close", () => {
+
+          if(ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.end();
+          }
+        });
+
+        LOG.info("Using x11grab capture from %s (%dx%d@%dfps).", display, viewport.width, viewport.height, CONFIG.streaming.frameRate);
+
+        outputStream = ffmpeg.stdout;
+      } else {
+
+        // macOS / bare metal: standard MediaRecorder pipeline. Video copies through unchanged; audio is transcoded Opus→AAC.
+        const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
+
+          LOG.error("FFmpeg process error: %s.", formatError(error));
 
           if(onFFmpegError) {
 
             onFFmpegError(error);
           }
-        }
-      });
+        }, streamId, comment);
 
-      // Diagnostic logging for capture stream health.
-      let captureBytes = 0;
-      let captureChunks = 0;
-      const captureLogInterval = setInterval(() => {
+        ffmpegProcess = ffmpeg;
 
-        if(captureBytes > 0) {
+        ffmpeg.stdout.on("error", (error) => {
 
-          const kbps = Math.round((captureBytes * 8) / 5000);
+          const errorMessage = formatError(error);
 
-          LOG.info("%sCapture: %d kbps, %d chunks/5s (avg %d bytes/chunk).",
-            streamId ? "[" + streamId + "] " : "", kbps, captureChunks,
-            captureChunks > 0 ? Math.round(captureBytes / captureChunks) : 0);
-          captureBytes = 0;
-          captureChunks = 0;
-        }
-      }, 5000);
+          if(errorMessage.includes("EPIPE")) {
 
-      captureLogInterval.unref();
+            LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
+          } else {
 
-      rawCaptureStream.on("data", (chunk: Buffer) => {
+            LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
+            ffmpeg.kill();
 
-        captureBytes += chunk.length;
-        captureChunks++;
-      });
+            if(onFFmpegError) {
 
-      rawCaptureStream.on("close", () => {
+              onFFmpegError(error);
+            }
+          }
+        });
 
-        clearInterval(captureLogInterval);
-      });
+        pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
 
-      // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup.
-      pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+          const errorMessage = formatError(error);
 
-        const errorMessage = formatError(error);
+          if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
 
-        if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
+            return;
+          }
 
-          return;
-        }
+          LOG.error("Capture pipeline error: %s.", errorMessage);
+          ffmpeg.kill();
 
-        LOG.error("Capture pipeline error: %s.", errorMessage);
-        ffmpeg.kill();
+          if(onFFmpegError) {
 
-        if(onFFmpegError) {
+            onFFmpegError(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
 
-          onFFmpegError(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
-
-      // Use FFmpeg's stdout (fMP4 output) as the output stream for segmentation.
-      outputStream = ffmpeg.stdout;
+        outputStream = ffmpeg.stdout;
+      }
     } else {
 
       // Native fMP4 mode: Use the raw capture stream directly. In this mode, rawCaptureStream and outputStream are the same object.
@@ -690,8 +724,25 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     throw error;
   }
 
-  // Resize and minimize window.
-  await resizeAndMinimizeWindow(page, !profile.noVideo);
+  // In x11grab mode, set the window to fullscreen instead of minimizing — x11grab captures the framebuffer directly and needs the content visible. In standard mode,
+  // resize and minimize to reduce GPU usage while MediaRecorder captures via the internal compositor.
+  if(process.env.PRISMCAST_CONTAINER === "1") {
+
+    // Set the window to fullscreen so content fills the entire Xvfb screen with no window chrome.
+    const cdpSession = await page.createCDPSession();
+
+    const windowInfo = await cdpSession.send("Browser.getWindowForTarget");
+
+    await cdpSession.send("Browser.setWindowBounds", {
+
+      bounds: { windowState: "fullscreen" },
+      windowId: windowInfo.windowId
+    });
+    await cdpSession.detach();
+  } else {
+
+    await resizeAndMinimizeWindow(page, !profile.noVideo);
+  }
 
   LOG.debug("timing:startup", "Page with capture ready. Total: %sms.", captureElapsed());
 
