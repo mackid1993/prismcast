@@ -169,34 +169,15 @@ export interface FFmpegProcess {
 }
 
 /**
- * Spawns an FFmpeg process configured to transcode WebM (H264+Opus) to fMP4 (H264+AAC). The process reads from stdin and writes to stdout, allowing it to be
- * integrated into a Node.js stream pipeline. Video is re-encoded with x264 veryfast to enforce constant frame rate — Chrome's MediaRecorder on Linux produces
- * variable frame rate (~60.06fps) that causes playback stutter on TVs and DVR clients. Audio is transcoded from Opus to AAC for HLS compatibility.
- *
- * FFmpeg arguments:
- * - `-hide_banner -loglevel warning`: Reduce noise, only show warnings/errors
- * - `-probesize 16384`: Limit input probing to 16KB (Chrome's WebM header fits well under this) to minimize startup delay
- * - `-i pipe:0`: Read input from stdin
- * - `-c:v libx264 -preset veryfast`: Re-encode video to enforce constant frame rate from Chrome's VFR MediaRecorder output
- * - `-b:v <bitrate> -maxrate <bitrate> -bufsize <2x bitrate>`: Target and cap video bitrate to the user's configured value
- * - `-r <frameRate>`: Output at the user's configured constant frame rate (e.g., 30, 60)
- * - `-c:a aac -b:a <bitrate>`: Transcode audio to AAC at specified bitrate
- * - `-af aresample=async=1`: Correct audio timestamp discontinuities from Chrome's MediaRecorder
- * - `-f mp4`: Output MP4 container format
- * - `-movflags frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer`: Streaming-friendly fMP4 flags
- * - `-flush_packets 1`: Flush output immediately after each packet to minimize latency
- * - `-max_muxing_queue_size 1024`: Prevent muxing buffer overflow during transcoding
- * - `pipe:1`: Write output to stdout
+ * Spawns an FFmpeg process configured to remux WebM (H264+Opus) to fMP4 (H264+AAC). The process reads from stdin and writes to stdout, allowing it to be
+ * integrated into a Node.js stream pipeline. Video is passed through unchanged (copy codec); audio is transcoded from Opus to AAC for HLS compatibility.
  * @param audioBitrate - Audio bitrate in bits per second (e.g., 256000 for 256 kbps).
- * @param videoBitrate - Video bitrate in bits per second (e.g., 8000000 for 8 Mbps).
- * @param frameRate - Target video frame rate (e.g., 30, 60). Enforces constant frame rate output via re-encoding.
  * @param onError - Callback invoked when FFmpeg exits unexpectedly or encounters an error.
  * @param streamId - Stream identifier for logging.
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with stdin, stdout, and kill function.
  */
-export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number, onError: (error: Error) => void, streamId?: string,
-  comment?: string): FFmpegProcess {
+export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
   // Use the cached FFmpeg path from resolveFFmpegPath(). This should always be set because isFFmpegAvailable() is called during startup, which populates the cache.
   // If somehow not set, fall back to "ffmpeg" and let spawn handle the error.
@@ -211,13 +192,7 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
     "-progress", "pipe:2",
     "-probesize", "16384",
     "-i", "pipe:0",
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-bf", "0",
-    "-b:v", String(videoBitrate),
-    "-maxrate", String(videoBitrate),
-    "-bufsize", String(videoBitrate * 2),
-    "-r", String(frameRate),
+    "-c:v", "copy",
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
