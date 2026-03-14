@@ -150,8 +150,31 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   pliInterval.unref();
 
-  // Create the offer — werift is the offerer (requesting video from Chrome).
+  // Create the offer and wait for ICE gathering to complete. The offer must include werift's ICE candidates so Chrome knows where to send RTP.
   await pc.setLocalDescription(await pc.createOffer());
+
+  // Wait for ICE gathering to complete.
+  await new Promise<void>((resolve) => {
+
+    if(pc.iceGatheringState === "complete") {
+
+      resolve();
+
+      return;
+    }
+
+    pc.iceGatheringStateChange.subscribe((state) => {
+
+      if(state === "complete") {
+
+        resolve();
+      }
+    });
+
+    // Timeout after 5 seconds.
+    setTimeout(resolve, 5000);
+  });
+
   const offerSdp = pc.localDescription?.sdp ?? "";
 
   // Log the offer SDP media lines for debugging.
