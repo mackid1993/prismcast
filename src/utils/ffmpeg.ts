@@ -187,54 +187,23 @@ export interface FFmpegProcess {
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with stdin, stdout, and kill function.
  */
-export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number,
-  onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
+export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
-  // Use system FFmpeg for VA-API hardware encoding when available. The bundled ffmpeg-for-homebridge doesn't have VA-API support.
-  const useVaapi = (process.platform === "linux") && existsSync("/dev/dri/renderD128") && existsSync("/usr/bin/ffmpeg");
-  const ffmpegPath = useVaapi ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
+  const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
   const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
-
-  LOG.info("FFmpeg: using %s (%s).", ffmpegPath, useVaapi ? "h264_vaapi hardware" : "copy passthrough");
 
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "warning",
     "-probesize", "16384",
-    "-analyzeduration", "0",
-    "-fflags", "nobuffer",
-    "-i", "pipe:0"
-  ];
-
-  if(useVaapi) {
-
-    // VA-API hardware re-encode: decode Chrome's H264, re-encode via iGPU at constant bitrate and framerate.
-    // Produces smooth CFR output with consistent bitrate — no keyframe spikes, no VFR jitter.
-    ffmpegArgs.push(
-      "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", "format=nv12,hwupload",
-      "-c:v", "h264_vaapi",
-      "-b:v", String(videoBitrate),
-      "-maxrate", String(videoBitrate),
-      "-bufsize", String(videoBitrate * 2),
-      "-r", String(frameRate),
-      "-g", String(frameRate * 2),
-      "-force_key_frames", "expr:gte(t,n_forced*2)"
-    );
-  } else {
-
-    // No GPU: copy video through unchanged.
-    ffmpegArgs.push("-c:v", "copy");
-  }
-
-  ffmpegArgs.push(
+    "-i", "pipe:0",
+    "-c:v", "copy",
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
-    "-af", "aresample=async=1",
     "-f", "mp4",
-    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-movflags", "empty_moov+default_base_moof+skip_sidx+skip_trailer+frag_every_frame",
     "-flush_packets", "1"
-  );
+  ];
 
   // Add metadata comment if provided. This embeds "PrismCast - <channel>" in the output for identification.
   if(comment) {
