@@ -909,14 +909,6 @@ async function launchBrowser(): Promise<Browser> {
             if (h264Codecs.length > 0) transceivers[0].setCodecPreferences(h264Codecs);
           }
 
-          // Collect ICE candidates for Node.js.
-          globalThis.WEBRTC_ICE_CANDIDATES = [];
-          pc.onicecandidate = function(e) {
-            if (e.candidate) {
-              globalThis.WEBRTC_ICE_CANDIDATES.push(JSON.stringify(e.candidate));
-            }
-          };
-
           // Audio: MediaRecorder (audio-only) over WebSocket.
           var audioStream = new MediaStream(captureStream.getAudioTracks());
           var recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm;codecs=opus" });
@@ -930,10 +922,22 @@ async function launchBrowser(): Promise<Browser> {
           };
           recorder.start(20);
 
-          // Create SDP offer and store for Node.js to read.
+          // Create SDP offer and wait for ICE gathering to complete before exposing it. The offer SDP must contain ICE
+          // candidates for werift to connect — without them, the RTP path can't be established.
           var offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
-          globalThis.WEBRTC_OFFER = offer.sdp;
+
+          await new Promise(function(resolve) {
+            if (pc.iceGatheringState === "complete") { resolve(); return; }
+            pc.onicegatheringstatechange = function() {
+              if (pc.iceGatheringState === "complete") resolve();
+            };
+            // Timeout after 5 seconds in case ICE gathering stalls.
+            setTimeout(resolve, 5000);
+          });
+
+          // Use the local description which now includes gathered ICE candidates.
+          globalThis.WEBRTC_OFFER = pc.localDescription.sdp;
           globalThis.WEBRTC_READY = true;
 
           // Force bitrate after connection establishes.
