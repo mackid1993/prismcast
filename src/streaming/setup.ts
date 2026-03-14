@@ -386,6 +386,11 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       audio: true,
       audioBitsPerSecond: CONFIG.streaming.audioBitsPerSecond,
       mimeType: captureMimeType,
+      // Reduce puppeteer-stream's internal buffer from 8MB to ~64KB. The default 8MB highWaterMark causes burst delivery —
+      // the Transform stream accumulates megabytes of WebM data before emitting, then dumps it all at once. FFmpeg processes
+      // the burst, producing output frames with clustered timestamps, causing visible stutter. A small buffer ensures
+      // WebM chunks flow to FFmpeg smoothly at the rate Chrome produces them.
+      streamConfig: { highWaterMarkMB: 0.0625 },
       video: true,
       videoBitsPerSecond: CONFIG.streaming.videoBitsPerSecond,
       videoConstraints: {
