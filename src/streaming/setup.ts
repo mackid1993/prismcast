@@ -489,6 +489,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       // Falls back to standard MediaRecorder pipeline if WebRTC isn't available.
       let useWebRTC = false;
       let webrtcPeer: Nullable<{
+        audioStream: Readable;
         candidates: string[];
         firstFrameDimensions: Promise<{ height: number; width: number }>;
         offer: string;
@@ -564,7 +565,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
         const viewport = getEffectiveViewport(CONFIG);
 
-        LOG.info("WebRTC: frame %dx%d → scale to %dx%d.", dims.width, dims.height, viewport.width, viewport.height);
+        LOG.info("WebRTC: frame %dx%d → center crop to %dx%d.", dims.width, dims.height, viewport.width, viewport.height);
         const ffmpeg = spawnWebRTCFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond,
           CONFIG.streaming.frameRate, dims.width, dims.height, viewport.width, viewport.height,
           ffmpegError, streamId, comment);
@@ -585,22 +586,12 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           webrtcPeer.videoStream.pipe(ffmpeg.videoPipe);
         }
 
-        // Pipe audio (0x02 prefixed WebM/Opus) from puppeteer-stream WebSocket to FFmpeg's audio pipe (fd 4).
-        rawCaptureStream.on("data", (chunk: Buffer) => {
+        // Pipe WebRTC audio (raw PCM from RTCAudioSink) to FFmpeg's audio pipe (fd 4).
+        // Both video and audio come from the same WebRTC connection — perfectly synchronized.
+        if(ffmpeg.audioPipe) {
 
-          if((chunk.length >= 2) && (chunk[0] === 0x02) && ffmpeg.audioPipe) {
-
-            ffmpeg.audioPipe.write(chunk.subarray(1));
-          }
-        });
-
-        rawCaptureStream.on("close", () => {
-
-          if(ffmpeg.audioPipe) {
-
-            ffmpeg.audioPipe.end();
-          }
-        });
+          webrtcPeer.audioStream.pipe(ffmpeg.audioPipe);
+        }
 
         ffmpeg.stdout.on("error", (error) => {
 

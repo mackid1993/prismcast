@@ -30,6 +30,9 @@ export interface WebRTCCapturePeer {
   // Set Chrome's SDP answer.
   setAnswer: (answer: string) => Promise<void>;
 
+  // Readable stream of raw s16le PCM audio.
+  audioStream: Readable;
+
   // Readable stream of raw I420 video frames.
   videoStream: Readable;
 
@@ -48,14 +51,16 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   const logPrefix = streamId ? "[" + streamId + "] " : "";
   const videoOutput = new PassThrough();
+  const audioOutput = new PassThrough();
   let closed = false;
 
   // Dynamic import for ESM compatibility — @roamhq/wrtc is a CommonJS native addon.
 
   const pc = new wrtc.RTCPeerConnection() as RTCPeerConnection;
 
-  // Add a recvonly transceiver to request video from Chrome.
+  // Add recvonly transceivers for both video and audio from Chrome.
   pc.addTransceiver("video", { direction: "recvonly" });
+  pc.addTransceiver("audio", { direction: "recvonly" });
 
   // Promise for the first frame's dimensions — setup.ts waits for this before spawning FFmpeg.
   let resolveDimensions: (dims: { height: number; width: number }) => void;
@@ -117,6 +122,22 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
       }, 5000);
 
       statsInterval.unref();
+    } else if(event.track.kind === "audio") {
+
+      LOG.info("%sWebRTC: audio track received.", logPrefix);
+
+      // Use RTCAudioSink to get raw PCM audio samples — synchronized with video via WebRTC.
+      const audioSink: any = new wrtc.nonstandard.RTCAudioSink(event.track);
+
+      audioSink.ondata = (evt: { samples: Buffer }): void => {
+
+        if(closed) {
+
+          return;
+        }
+
+        audioOutput.write(Buffer.from(evt.samples));
+      };
     }
   };
 
@@ -167,6 +188,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
     closed = true;
     pc.close();
     videoOutput.end();
+    audioOutput.end();
     LOG.info("%sWebRTC: peer closed.", logPrefix);
   };
 
@@ -183,6 +205,7 @@ export async function createWebRTCCapturePeer(streamId?: string): Promise<WebRTC
 
   return {
 
+    audioStream: audioOutput,
     candidates: [],
     close,
     firstFrameDimensions,
