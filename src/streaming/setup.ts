@@ -4,7 +4,8 @@
  */
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
-import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext, spawnFFmpeg, startTimer } from "../utils/index.js";
+import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext,
+  spawnFFmpeg, spawnX11GrabFFmpeg, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
 import { getNextStreamId, getStreamCount } from "./registry.js";
@@ -392,10 +393,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
         mandatory: {
 
-          maxFrameRate: 60,
+          maxFrameRate: CONFIG.streaming.frameRate,
           maxHeight: getEffectiveViewport(CONFIG).height,
           maxWidth: getEffectiveViewport(CONFIG).width,
-          minFrameRate: Math.max(30, Math.min(60, CONFIG.streaming.frameRate)),
+          minFrameRate: CONFIG.streaming.frameRate,
           minHeight: getEffectiveViewport(CONFIG).height,
           minWidth: getEffectiveViewport(CONFIG).width
         }
@@ -473,62 +474,124 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
-      const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, (error) => {
+      // In Docker containers, use x11grab to capture video directly from the Xvfb display at an exact constant frame rate, bypassing Chrome's MediaRecorder entirely
+      // for video. MediaRecorder on Linux drops frames due to its software encoder — x11grab reads pixels from the framebuffer at precisely the target rate. Audio still
+      // comes from puppeteer-stream's MediaRecorder (audio-only) piped to FFmpeg. On macOS/bare metal, the standard MediaRecorder pipeline is used unchanged.
+      const useX11Grab = process.env.PRISMCAST_CONTAINER === "1";
 
-        LOG.error("FFmpeg process error: %s.", formatError(error));
+      if(useX11Grab) {
 
-        if(onFFmpegError) {
+        const display = process.env.DISPLAY ?? ":99";
+        const viewport = getEffectiveViewport(CONFIG);
 
-          onFFmpegError(error);
-        }
-      }, streamId, comment);
+        // In kiosk mode (Docker), chrome height is 0 — no browser UI visible.
+        const ffmpeg = spawnX11GrabFFmpeg(display, viewport.width, viewport.height, 0, CONFIG.streaming.frameRate,
+          CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.audioBitsPerSecond, (error) => {
 
-      ffmpegProcess = ffmpeg;
+            LOG.error("x11grab FFmpeg error: %s.", formatError(error));
 
-      // Handle pipe errors on stdout. Stdin errors are handled by pipeline() below.
-      ffmpeg.stdout.on("error", (error) => {
+            if(onFFmpegError) {
 
-        const errorMessage = formatError(error);
+              onFFmpegError(error);
+            }
+          }, streamId, comment);
 
-        if(errorMessage.includes("EPIPE")) {
+        ffmpegProcess = ffmpeg;
 
-          LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
-        } else {
+        // Handle pipe errors on stdout.
+        ffmpeg.stdout.on("error", (error) => {
 
-          LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
-          ffmpeg.kill();
+          const errorMessage = formatError(error);
+
+          if(errorMessage.includes("EPIPE")) {
+
+            LOG.debug("streaming:ffmpeg", "x11grab stdout pipe closed: %s.", errorMessage);
+          } else {
+
+            LOG.error("x11grab stdout pipe error: %s.", errorMessage);
+            ffmpeg.kill();
+
+            if(onFFmpegError) {
+
+              onFFmpegError(error);
+            }
+          }
+        });
+
+        // Pipe the capture stream (audio-only WebM from MediaRecorder) to FFmpeg's audio pipe (fd 3).
+        rawCaptureStream.on("data", (chunk: Buffer) => {
+
+          if(ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.write(chunk);
+          }
+        });
+
+        rawCaptureStream.on("close", () => {
+
+          if(ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.end();
+          }
+        });
+
+        LOG.info("Using x11grab capture from %s (%dx%d@%dfps).", display, viewport.width, viewport.height, CONFIG.streaming.frameRate);
+
+        outputStream = ffmpeg.stdout;
+      } else {
+
+        // macOS / bare metal: standard MediaRecorder pipeline. Video copies through unchanged; audio is transcoded Opus→AAC.
+        const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
+
+          LOG.error("FFmpeg process error: %s.", formatError(error));
 
           if(onFFmpegError) {
 
             onFFmpegError(error);
           }
-        }
-      });
+        }, streamId, comment);
 
-      // Pipe the WebM capture stream to FFmpeg's stdin using pipeline() for proper cleanup. When FFmpeg is killed during tab replacement, pipeline() automatically
-      // destroys the source stream, preventing "write after end" errors that would occur with .pipe().
-      pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+        ffmpegProcess = ffmpeg;
 
-        const errorMessage = formatError(error);
+        ffmpeg.stdout.on("error", (error) => {
 
-        // EPIPE, "write after end", and "Premature close" errors are expected during cleanup when FFmpeg is killed or the capture stream is destroyed.
-        if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
+          const errorMessage = formatError(error);
 
-          return;
-        }
+          if(errorMessage.includes("EPIPE")) {
 
-        // Unexpected pipeline errors require cleanup.
-        LOG.error("Capture pipeline error: %s.", errorMessage);
-        ffmpeg.kill();
+            LOG.debug("streaming:ffmpeg", "FFmpeg stdout pipe closed: %s.", errorMessage);
+          } else {
 
-        if(onFFmpegError) {
+            LOG.error("FFmpeg stdout pipe error: %s.", errorMessage);
+            ffmpeg.kill();
 
-          onFFmpegError(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
+            if(onFFmpegError) {
 
-      // Use FFmpeg's stdout (fMP4 output) as the output stream for segmentation.
-      outputStream = ffmpeg.stdout;
+              onFFmpegError(error);
+            }
+          }
+        });
+
+        pipeline(stream as unknown as Readable, ffmpeg.stdin).catch((error: unknown) => {
+
+          const errorMessage = formatError(error);
+
+          if(errorMessage.includes("EPIPE") || errorMessage.includes("write after end") || errorMessage.includes("Premature close")) {
+
+            return;
+          }
+
+          LOG.error("Capture pipeline error: %s.", errorMessage);
+          ffmpeg.kill();
+
+          if(onFFmpegError) {
+
+            onFFmpegError(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+
+        outputStream = ffmpeg.stdout;
+      }
     } else {
 
       // Native fMP4 mode: Use the raw capture stream directly. In this mode, rawCaptureStream and outputStream are the same object.
@@ -662,8 +725,9 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     throw error;
   }
 
-  // Resize and minimize window.
-  await resizeAndMinimizeWindow(page, !profile.noVideo);
+  // In Docker with kiosk mode, don't minimize — x11grab needs the content visible. Kiosk mode fills the screen automatically.
+  // On other platforms, resize to viewport + chrome and minimize for MediaRecorder capture.
+  await resizeAndMinimizeWindow(page, (process.env.PRISMCAST_CONTAINER !== "1") && !profile.noVideo);
 
   LOG.debug("timing:startup", "Page with capture ready. Total: %sms.", captureElapsed());
 

@@ -40,6 +40,7 @@ const ffmpegPath = ffmpegForHomebridge as unknown as string | undefined;
 // Cached FFmpeg path after resolution. Null means not yet resolved, undefined means not found.
 let cachedFFmpegPath: Nullable<string> | undefined = null;
 
+
 /**
  * Checks if FFmpeg exists at a specific path by attempting to run it.
  * @param pathToCheck - Full path to the FFmpeg executable.
@@ -154,6 +155,9 @@ export async function resolveFFmpegPath(): Promise<string | undefined> {
  */
 export interface FFmpegProcess {
 
+  // Writable stream for piping audio to FFmpeg. Only present in x11grab mode.
+  audioPipe?: Writable;
+
   // Function to gracefully terminate the FFmpeg process.
   kill: () => void;
 
@@ -168,45 +172,61 @@ export interface FFmpegProcess {
 }
 
 /**
- * Spawns an FFmpeg process configured to transcode WebM (H264+Opus) to fMP4 (H264+AAC). The process reads from stdin and writes to stdout, allowing it to be
- * integrated into a Node.js stream pipeline. Video is passed through unchanged; audio is transcoded from Opus to AAC for HLS compatibility.
- *
- * FFmpeg arguments:
- * - `-hide_banner -loglevel warning`: Reduce noise, only show warnings/errors
- * - `-probesize 16384`: Limit input probing to 16KB (Chrome's WebM header fits well under this) to minimize startup delay
- * - `-i pipe:0`: Read input from stdin
- * - `-c:v copy`: Copy video stream without re-encoding (H264 passthrough)
- * - `-c:a aac -b:a <bitrate>`: Transcode audio to AAC at specified bitrate
- * - `-f mp4`: Output MP4 container format
- * - `-movflags frag_keyframe+empty_moov+default_base_moof`: Streaming-friendly fMP4 flags
- * - `-flush_packets 1`: Flush output immediately after each packet to minimize latency
- * - `pipe:1`: Write output to stdout
+ * Spawns an FFmpeg process configured to remux WebM (H264+Opus) to fMP4 (H264+AAC). The process reads from stdin and writes to stdout, allowing it to be
+ * integrated into a Node.js stream pipeline. Video is passed through unchanged (copy codec); audio is transcoded from Opus to AAC for HLS compatibility.
  * @param audioBitrate - Audio bitrate in bits per second (e.g., 256000 for 256 kbps).
  * @param onError - Callback invoked when FFmpeg exits unexpectedly or encounters an error.
  * @param streamId - Stream identifier for logging.
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with stdin, stdout, and kill function.
  */
-export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
+export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number,
+  onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
-  const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
+  // On Linux with VA-API hardware, use the system FFmpeg (which has VA-API compiled in) for hardware re-encoding. The bundled ffmpeg-for-homebridge doesn't
+  // have VA-API support. On macOS (VideoToolbox MediaRecorder = perfect 60fps), just copy the video through — no re-encode needed.
+  const useVaapi = (process.platform === "linux") && existsSync("/dev/dri/renderD128");
+  const ffmpegPath = useVaapi ? "ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
+
   const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
 
   const ffmpegArgs = [
     "-hide_banner",
-    "-loglevel", "warning",
+    "-loglevel", "info",
+    "-progress", "pipe:2",
     "-probesize", "16384",
-    "-i", "pipe:0",
-    "-c:v", "copy",
+    "-i", "pipe:0"
+  ];
+
+  if(useVaapi) {
+
+    // VA-API hardware re-encode: decode the WebM H264, re-encode via Quick Sync at the target frame rate and bitrate. This converts Chrome's VFR output with
+    // dropped frames into perfect CFR output — the hardware encoder is fast enough that speed is never a concern.
+    ffmpegArgs.push(
+      "-vaapi_device", "/dev/dri/renderD128",
+      "-vf", "format=nv12,hwupload",
+      "-c:v", "h264_vaapi",
+      "-bf", "0",
+      "-r", String(frameRate),
+      "-b:v", String(videoBitrate),
+      "-maxrate", String(videoBitrate),
+      "-bufsize", String(videoBitrate * 2)
+    );
+  } else {
+
+    // macOS or no GPU: copy video through unchanged. macOS MediaRecorder uses VideoToolbox which already produces perfect CFR.
+    ffmpegArgs.push("-c:v", "copy");
+  }
+
+  ffmpegArgs.push(
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
-    "-max_interleave_delta", "0",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
-    "-frag_duration", "1000000",
-    "-flush_packets", "1"
-  ];
+    "-flush_packets", "1",
+    "-max_muxing_queue_size", "1024"
+  );
 
   // Add metadata comment if provided. This embeds "PrismCast - <channel>" in the output for identification.
   if(comment) {
@@ -226,10 +246,13 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
   // Track whether graceful shutdown has been initiated. When true, we suppress error callbacks because any exit (whether from SIGTERM or stdin close) is expected.
   let shuttingDown = false;
 
-  // Log FFmpeg stderr output (warnings and errors). stderr is guaranteed to be a Readable since we set stdio: ["pipe", "pipe", "pipe"].
+  // Parse FFmpeg progress stats from stderr. With -progress pipe:2, FFmpeg writes key=value pairs. We extract frame count, fps, speed, and bitrate and log them
+  // every 5 seconds to diagnose encoding performance and frame delivery issues.
+  let lastProgressLog = Date.now();
+  const progressStats: Record<string, string> = {};
+
   ffmpeg.stderr.on("data", (data: Buffer) => {
 
-    // Suppress warnings during shutdown - truncated input warnings are expected when the capture stream closes.
     if(shuttingDown) {
 
       return;
@@ -237,17 +260,45 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
 
     const message = data.toString().trim();
 
-    // Filter out common noise that isn't actionable.
-    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=" ];
+    // Parse progress key=value pairs from -progress pipe:2.
+    for(const line of message.split("\n")) {
 
-    if(noisePatterns.some((pattern) => message.includes(pattern))) {
+      const eqIdx = line.indexOf("=");
 
-      return;
+      if(eqIdx > 0) {
+
+        progressStats[line.substring(0, eqIdx).trim()] = line.substring(eqIdx + 1).trim();
+      }
     }
 
-    if(message.length > 0) {
+    // Log progress every 5 seconds.
+    const now = Date.now();
 
-      LOG.debug("streaming:ffmpeg", "%sFFmpeg: %s", logPrefix, message);
+    if((now - lastProgressLog) >= 5000) {
+
+      const frame = progressStats.frame || "?";
+      const fps = progressStats.fps || "?";
+      const speed = progressStats.speed || "?";
+      const bitrate = progressStats.bitrate || "?";
+      const drop = progressStats.drop_frames || "0";
+
+      LOG.info("%sFFmpeg: frame=%s fps=%s speed=%s bitrate=%s dropped=%s", logPrefix, frame, fps, speed, bitrate, drop);
+      lastProgressLog = now;
+    }
+
+    // Still log warnings/errors that aren't progress data.
+    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+
+    for(const line of message.split("\n")) {
+
+      const trimmed = line.trim();
+
+      if((trimmed.length === 0) || trimmed.includes("=") || noisePatterns.some((p) => trimmed.includes(p))) {
+
+        continue;
+      }
+
+      LOG.debug("streaming:ffmpeg", "%sFFmpeg: %s", logPrefix, trimmed);
     }
   });
 
@@ -309,6 +360,203 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
 }
 
 /**
+ * Spawns an FFmpeg process that captures video directly from the X11 display via x11grab and receives audio via pipe. This bypasses Chrome's MediaRecorder entirely
+ * for video — x11grab reads pixels from the Xvfb framebuffer at an exact constant frame rate, then h264_vaapi hardware-encodes them. Audio comes from puppeteer-stream's
+ * MediaRecorder (audio-only WebM/Opus) piped to fd 3. The result is perfectly constant frame rate video with no dropped or duplicated frames.
+ *
+ * @param display - X11 display identifier (e.g., ":99").
+ * @param width - Capture width in pixels.
+ * @param height - Capture height in pixels.
+ * @param frameRate - Target frame rate (e.g., 60).
+ * @param videoBitrate - Video bitrate in bits per second.
+ * @param audioBitrate - Audio bitrate in bits per second.
+ * @param onError - Callback invoked when FFmpeg exits unexpectedly.
+ * @param streamId - Stream identifier for logging.
+ * @param comment - Optional metadata comment.
+ * @returns FFmpeg process with audioPipe (fd 3) for audio input, stdout for fMP4 output.
+ */
+export function spawnX11GrabFFmpeg(display: string, width: number, height: number, offsetY: number, frameRate: number,
+  videoBitrate: number, audioBitrate: number, onError: (error: Error) => void, streamId?: string,
+  comment?: string): FFmpegProcess {
+
+  // Use system FFmpeg for VA-API support. Fall back to bundled FFmpeg with software encoding.
+  const useVaapi = existsSync("/dev/dri/renderD128") && existsSync("/usr/bin/ffmpeg");
+  const ffmpegPath = useVaapi ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
+
+  LOG.info("x11grab using %s (VA-API: %s).", ffmpegPath, useVaapi ? "yes" : "no");
+  const aacEncoder = "aac";
+
+  const ffmpegArgs = [
+    "-hide_banner",
+    "-loglevel", "info",
+    "-progress", "pipe:2",
+    // Input 0: x11grab video from the content area of Chrome's window, skipping the browser chrome (toolbar/tabs).
+    // Capture exactly viewport dimensions starting at (0, offsetY) where offsetY = browser chrome height.
+    "-f", "x11grab",
+    "-draw_mouse", "0",
+    "-framerate", String(frameRate),
+    "-video_size", String(width) + "x" + String(height),
+    "-i", display + "+0," + String(offsetY),
+    // Input 1: WebM from puppeteer-stream via fd 3 (contains video+audio, we only use audio).
+    "-f", "webm",
+    "-i", "pipe:3",
+    // Explicit mapping: video from x11grab, audio from WebM. Without this, FFmpeg might pick the wrong video stream.
+    "-map", "0:v",
+    "-map", "1:a"
+  ];
+
+  // Video encoding. x11grab captures exactly the content area, no cropping needed.
+  if(useVaapi) {
+
+    ffmpegArgs.push(
+      "-vaapi_device", "/dev/dri/renderD128",
+      "-vf", "format=nv12,hwupload",
+      "-c:v", "h264_vaapi",
+      "-bf", "0",
+      "-b:v", String(videoBitrate),
+      "-maxrate", String(videoBitrate),
+      "-bufsize", String(videoBitrate * 2)
+    );
+  } else {
+
+    ffmpegArgs.push(
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-bf", "0",
+      "-b:v", String(videoBitrate),
+      "-maxrate", String(videoBitrate),
+      "-bufsize", String(videoBitrate * 2)
+    );
+  }
+
+  // Audio encoding + output.
+  ffmpegArgs.push(
+    "-c:a", aacEncoder,
+    "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1",
+    "-f", "mp4",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-frag_duration", "1000000",
+    "-flush_packets", "1",
+    "-max_muxing_queue_size", "4096"
+  );
+
+  if(comment) {
+
+    ffmpegArgs.push("-metadata", "comment=PrismCast - " + comment);
+  }
+
+  ffmpegArgs.push("pipe:1");
+
+  // fd 3 = audio pipe input.
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+
+    stdio: [ "ignore", "pipe", "pipe", "pipe" ]
+  });
+
+  const logPrefix = streamId ? "[" + streamId + "] " : "";
+  let shuttingDown = false;
+  let lastProgressLog = Date.now();
+  const progressStats: Record<string, string> = {};
+
+  // Log FFmpeg stderr output. stderr is guaranteed non-null since stdio[2] is "pipe".
+  ffmpeg.stderr!.on("data", (data: Buffer) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    const message = data.toString().trim();
+
+    for(const line of message.split("\n")) {
+
+      const eqIdx = line.indexOf("=");
+
+      if(eqIdx > 0) {
+
+        progressStats[line.substring(0, eqIdx).trim()] = line.substring(eqIdx + 1).trim();
+      }
+    }
+
+    const now = Date.now();
+
+    if((now - lastProgressLog) >= 5000) {
+
+      const frame = progressStats.frame || "?";
+      const fps = progressStats.fps || "?";
+      const speed = progressStats.speed || "?";
+      const bitrate = progressStats.bitrate || "?";
+      const drop = progressStats.drop_frames || "0";
+
+      LOG.info("%sx11grab: frame=%s fps=%s speed=%s bitrate=%s dropped=%s", logPrefix, frame, fps, speed, bitrate, drop);
+      lastProgressLog = now;
+    }
+
+    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+
+    for(const line of message.split("\n")) {
+
+      const trimmed = line.trim();
+
+      if((trimmed.length === 0) || trimmed.includes("=") || noisePatterns.some((p) => trimmed.includes(p))) {
+
+        continue;
+      }
+
+      LOG.debug("streaming:ffmpeg", "%sx11grab: %s", logPrefix, trimmed);
+    }
+  });
+
+  ffmpeg.on("exit", (code, signal) => {
+
+    if(shuttingDown || (signal === "SIGTERM")) {
+
+      return;
+    }
+
+    if((code !== null) && (code !== 0)) {
+
+      onError(new Error("x11grab FFmpeg exited with code " + String(code) + "."));
+    } else if(signal) {
+
+      onError(new Error("x11grab FFmpeg killed by signal " + signal + "."));
+    }
+  });
+
+  ffmpeg.on("error", (error) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    onError(error);
+  });
+
+  const kill = (): void => {
+
+    shuttingDown = true;
+
+    if(!ffmpeg.killed) {
+
+      ffmpeg.kill("SIGTERM");
+    }
+  };
+
+  const audioPipe = ffmpeg.stdio[3] as Writable;
+
+  return {
+
+    audioPipe,
+    kill,
+    process: ffmpeg,
+    stdin: ffmpeg.stdin as unknown as Writable,
+    stdout: ffmpeg.stdout!
+  };
+}
+
+/**
  * Spawns an FFmpeg process configured to remux fMP4 input to MPEG-TS output with codec copy. The process reads a continuous fMP4 stream (init segment followed by
  * media segments) from stdin and writes MPEG-TS to stdout. No transcoding occurs — both video (H264) and audio (AAC) are copied unchanged — so CPU usage is minimal.
  *
@@ -351,6 +599,7 @@ export function spawnMpegTsRemuxer(onError: (error: Error) => void, streamId?: s
     "-pat_period", "0.1",
     "-pcr_period", "40",
     "-flush_packets", "1",
+    "-max_muxing_queue_size", "1024",
     "pipe:1"
   ];
 
