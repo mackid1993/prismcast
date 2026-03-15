@@ -201,8 +201,8 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-f", "mp4",
-    "-movflags", "empty_moov+default_base_moof+skip_sidx+skip_trailer",
-    "-frag_duration", "500000",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-frag_duration", "1000000",
     "-flush_packets", "1"
   ];
 
