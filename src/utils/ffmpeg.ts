@@ -224,6 +224,8 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
   ffmpegArgs.push(
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
+    "-af", "aresample=async=1",
+    "-max_interleave_delta", "0",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-frag_duration", "1000000",
