@@ -390,12 +390,14 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: x11grab captures the full Xvfb screen. scale_vaapi on the GPU scales to output dimensions.
+    // Input 0: x11grab captures the full Xvfb screen. thread_queue_size prevents frame drops from input buffering.
+    "-thread_queue_size", "512",
     "-f", "x11grab",
     "-draw_mouse", "0",
     "-framerate", String(frameRate),
     "-i", display,
     // Input 1: WebM from puppeteer-stream via fd 3 (contains video+audio, we only use audio).
+    "-thread_queue_size", "512",
     "-f", "webm",
     "-i", "pipe:3",
     // Explicit mapping: video from x11grab, audio from WebM. Without this, FFmpeg might pick the wrong video stream.
@@ -409,9 +411,10 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
 
     ffmpegArgs.push(
       "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", "format=nv12,hwupload,scale_vaapi=w=" + String(width) + ":h=" + String(height),
+      "-vf", "hwmap=derive_device=vaapi,scale_vaapi=w=" + String(width) + ":h=" + String(height) + ":format=nv12",
       "-c:v", "h264_vaapi",
-      "-bf", "0",
+      "-bf", "4",
+      "-threads", "4",
       "-b:v", String(videoBitrate),
       "-maxrate", String(videoBitrate),
       "-bufsize", String(videoBitrate * 2)
