@@ -329,7 +329,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
   // GStreamer pipeline: ximagesrc captures Xvfb, vaapipostproc converts to VA surface, vaapih264enc encodes on GPU.
   // Output MPEG-TS to stdout — FFmpeg reads this for audio muxing.
   const gstPipeline = [
-    "ximagesrc", "display-name=" + display, "remote=true", "use-damage=false",
+    "ximagesrc", "display-name=" + display, "remote=true", "use-damage=false", "show-pointer=false",
     "!", "video/x-raw,framerate=" + String(frameRate) + "/1",
     "!", "vaapipostproc",
     "!", "vaapih264enc",
@@ -359,6 +359,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "-f", "mpegts",
     "-i", "pipe:0",
     "-thread_queue_size", "512",
+    "-use_wallclock_as_timestamps", "1",
     "-f", "webm",
     "-i", "pipe:3",
     "-map", "0:v",
