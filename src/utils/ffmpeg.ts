@@ -405,12 +405,13 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
     "-map", "1:a"
   ];
 
-  // Video encoding. x11grab captures exactly the content area, no cropping needed.
+  // Video encoding. Upload raw pixels to GPU first, then scale on GPU — avoids CPU-side crop/resize
+  // which bottlenecks at ~50fps on 2160x1440 input. scale_vaapi runs entirely on the iGPU.
   if(useVaapi) {
 
     ffmpegArgs.push(
       "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", "format=nv12,hwupload",
+      "-vf", "format=nv12,hwupload,scale_vaapi=w=" + String(width) + ":h=" + String(height),
       "-c:v", "h264_vaapi",
       "-bf", "0",
       "-b:v", String(videoBitrate),
@@ -420,6 +421,7 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
   } else {
 
     ffmpegArgs.push(
+      "-vf", "scale=" + String(width) + ":" + String(height),
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-bf", "0",
