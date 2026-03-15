@@ -526,8 +526,8 @@ export function buildLaunchOptions(): LaunchOptions {
       "--hide-crash-restore-bubble",
       "--hide-scrollbars",
       "--no-first-run",
-      // In Docker with x11grab, use kiosk mode to hide all browser chrome (address bar, tabs, window decorations).
-      // x11grab captures the framebuffer directly — any visible UI ends up in the output.
+      // In Docker with GStreamer, use kiosk mode to hide all browser chrome (address bar, tabs, window decorations).
+      // GStreamer captures the framebuffer directly — any visible UI ends up in the output.
       [ "--window-size=", String(getPresetViewport(CONFIG).width), ",", String(getPresetViewport(CONFIG).height) ].join("")
     ],
 
@@ -652,7 +652,7 @@ async function detectDisplayDimensions(browser: Browser): Promise<void> {
     // Cache the results for use by the preset system and window sizing.
     setBrowserChrome(dimensions.chromeWidth, dimensions.chromeHeight);
 
-    // In Docker with x11grab, report the full screen as the max viewport — x11grab captures the screen, not the content area.
+    // In Docker with GStreamer, report the full screen as the max viewport — GStreamer captures the screen, not the content area.
     if(process.env.PRISMCAST_CONTAINER === "1") {
 
       setMaxSupportedViewport(dimensions.availWidth, dimensions.availHeight);
@@ -667,7 +667,7 @@ async function detectDisplayDimensions(browser: Browser): Promise<void> {
       maxWidth, maxHeight);
 
     // Check if the configured preset needs to be degraded and warn the user.
-    // In Docker with x11grab, skip degradation — x11grab captures the full Xvfb screen, not Chrome's content area.
+    // In Docker with GStreamer, skip degradation — GStreamer captures the full Xvfb screen, not Chrome's content area.
     if(process.env.PRISMCAST_CONTAINER !== "1") {
 
       const presetResult = getEffectivePreset(CONFIG);
