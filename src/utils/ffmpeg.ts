@@ -411,7 +411,7 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
 
     ffmpegArgs.push(
       "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", "format=nv12,hwupload,scale_vaapi=w=" + String(width) + ":h=" + String(height),
+      "-vf", "format=nv12|vaapi,hwupload",
       "-c:v", "h264_vaapi",
       "-bf", "0",
       "-b:v", String(videoBitrate),
