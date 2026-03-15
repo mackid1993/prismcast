@@ -219,7 +219,10 @@ export function getEffectivePreset(config: Config): EffectivePresetResult {
   // In Docker with x11grab, bypass viewport validation. x11grab captures the Xvfb screen directly — the preset
   // should match the Xvfb resolution, not Chrome's content area (which is smaller due to toolbar height).
   // Without this bypass, PrismCast downgrades 1080p to 720p because Chrome's content area is ~1000px on a 1080p screen.
-  if(!maxViewport || (process.env.PRISMCAST_CONTAINER === "1")) {
+  // In Docker, x11grab captures the full screen — bypass viewport degradation.
+  const isContainer = process.env.PRISMCAST_CONTAINER === "1";
+
+  if(!maxViewport || isContainer) {
 
     return {
 
