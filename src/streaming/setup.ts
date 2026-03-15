@@ -527,6 +527,14 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           }
         });
 
+        rawCaptureStream.on("end", () => {
+
+          if(ffmpeg.audioPipe) {
+
+            ffmpeg.audioPipe.end();
+          }
+        });
+
         rawCaptureStream.on("close", () => {
 
           if(ffmpeg.audioPipe) {
