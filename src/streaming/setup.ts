@@ -474,12 +474,12 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
-      // In Docker containers, use x11grab to capture video directly from the Xvfb display at an exact constant frame rate, bypassing Chrome's MediaRecorder entirely
-      // for video. MediaRecorder on Linux drops frames due to its software encoder — x11grab reads pixels from the framebuffer at precisely the target rate. Audio still
+      // In Docker containers, use GStreamer to capture video directly from the Xvfb display at an exact constant frame rate, bypassing Chrome's MediaRecorder entirely
+      // for video. MediaRecorder on Linux drops frames due to its software encoder — GStreamer reads pixels from the framebuffer at precisely the target rate. Audio still
       // comes from puppeteer-stream's MediaRecorder (audio-only) piped to FFmpeg. On macOS/bare metal, the standard MediaRecorder pipeline is used unchanged.
-      const useX11Grab = process.env.PRISMCAST_CONTAINER === "1";
+      const useGStreamer = process.env.PRISMCAST_CONTAINER === "1";
 
-      if(useX11Grab) {
+      if(useGStreamer) {
 
         const display = process.env.DISPLAY ?? ":99";
         const viewport = getEffectiveViewport(CONFIG);
@@ -488,7 +488,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         const ffmpeg = spawnGstreamerCapture(display, viewport.width, viewport.height, CONFIG.streaming.frameRate,
           CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.audioBitsPerSecond, (error) => {
 
-            LOG.error("x11grab FFmpeg error: %s.", formatError(error));
+            LOG.error("GStreamer FFmpeg error: %s.", formatError(error));
 
             if(onFFmpegError) {
 
@@ -505,10 +505,10 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
           if(errorMessage.includes("EPIPE")) {
 
-            LOG.debug("streaming:ffmpeg", "x11grab stdout pipe closed: %s.", errorMessage);
+            LOG.debug("streaming:ffmpeg", "GStreamer stdout pipe closed: %s.", errorMessage);
           } else {
 
-            LOG.error("x11grab stdout pipe error: %s.", errorMessage);
+            LOG.error("GStreamer stdout pipe error: %s.", errorMessage);
             ffmpeg.kill();
 
             if(onFFmpegError) {
@@ -543,7 +543,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           }
         });
 
-        LOG.info("Using x11grab capture from %s (%dx%d@%dfps).", display, viewport.width, viewport.height, CONFIG.streaming.frameRate);
+        LOG.info("Using GStreamer capture from %s (%dx%d@%dfps).", display, viewport.width, viewport.height, CONFIG.streaming.frameRate);
 
         outputStream = ffmpeg.stdout;
       } else {
@@ -735,7 +735,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
   if(process.env.PRISMCAST_CONTAINER === "1") {
 
-    // In Docker with x11grab, position Chrome at (0,0) and size it to fill the entire Xvfb screen.
+    // In Docker with GStreamer, position Chrome at (0,0) and size it to fill the entire Xvfb screen.
     // Don't use fullscreen — just set exact position and dimensions so there's no offset or gap.
     const screenWidth = parseInt(process.env.SCREEN_WIDTH ?? "1920", 10);
     const screenHeight = parseInt(process.env.SCREEN_HEIGHT ?? "1080", 10);

@@ -155,7 +155,7 @@ export async function resolveFFmpegPath(): Promise<string | undefined> {
  */
 export interface FFmpegProcess {
 
-  // Writable stream for piping audio to FFmpeg. Only present in x11grab mode.
+  // Writable stream for piping audio to FFmpeg. Only present in GStreamer mode.
   audioPipe?: Writable;
 
   // Function to gracefully terminate the FFmpeg process.
@@ -303,8 +303,8 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
 }
 
 /**
- * Spawns an FFmpeg process that captures video directly from the X11 display via x11grab and receives audio via pipe. This bypasses Chrome's MediaRecorder entirely
- * for video — x11grab reads pixels from the Xvfb framebuffer at an exact constant frame rate, then h264_vaapi hardware-encodes them. Audio comes from puppeteer-stream's
+ * Spawns an FFmpeg process that captures video directly from the X11 display via GStreamer and receives audio via pipe. This bypasses Chrome's MediaRecorder entirely
+ * for video — GStreamer reads pixels from the Xvfb framebuffer at an exact constant frame rate, then h264_vaapi hardware-encodes them. Audio comes from puppeteer-stream's
  * MediaRecorder (audio-only WebM/Opus) piped to fd 3. The result is perfectly constant frame rate video with no dropped or duplicated frames.
  *
  * @param display - X11 display identifier (e.g., ":99").
@@ -356,10 +356,11 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
+    "-fflags", "nobuffer",
     "-f", "mpegts",
     "-i", "pipe:0",
     "-thread_queue_size", "512",
-    "-use_wallclock_as_timestamps", "1",
+    "-fflags", "nobuffer",
     "-f", "webm",
     "-i", "pipe:3",
     "-map", "0:v",
