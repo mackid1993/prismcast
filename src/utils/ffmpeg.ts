@@ -339,7 +339,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "!", "h264parse",
     "!", "queue",
     "!", "mux.",
-    "pulsesrc",
+    "pulsesrc", "device=auto_null.monitor",
     "!", "audioconvert",
     "!", "avenc_aac",
     "!", "aacparse",
