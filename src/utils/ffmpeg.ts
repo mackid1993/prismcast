@@ -328,6 +328,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
   // GStreamer pipeline: ximagesrc captures video from Xvfb, pulsesrc captures audio from PulseAudio (Chrome's audio output).
   // Both are encoded on the GPU (H264 via VA-API) and muxed into MPEG-TS. Single process, single clock = perfect A/V sync.
   const gstPipeline = [
+    "mpegtsmux", "name=mux", "!", "fdsink", "fd=1",
     "ximagesrc", "display-name=" + display, "remote=true", "use-damage=false", "show-pointer=false",
     "!", "video/x-raw,framerate=" + String(frameRate) + "/1",
     "!", "vaapipostproc",
@@ -336,14 +337,14 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "keyframe-period=" + String(frameRate * 2),
     "!", "video/x-h264,profile=main",
     "!", "h264parse",
+    "!", "queue",
     "!", "mux.",
     "pulsesrc",
     "!", "audioconvert",
     "!", "voaacenc", "bitrate=" + String(audioBitrate),
     "!", "aacparse",
-    "!", "mux.",
-    "mpegtsmux", "name=mux",
-    "!", "fdsink", "fd=1"
+    "!", "queue",
+    "!", "mux."
   ];
 
   LOG.info("%sGStreamer capture: %dx%d@%dfps, video=%dk, audio=%dk (PulseAudio).",
@@ -399,7 +400,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
 
     if(message.length > 0) {
 
-      LOG.debug("streaming:gstreamer", "%sGStreamer: %s", logPrefix, message);
+      LOG.info("%sGStreamer: %s", logPrefix, message);
     }
   });
 
