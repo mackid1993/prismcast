@@ -651,7 +651,15 @@ async function detectDisplayDimensions(browser: Browser): Promise<void> {
 
     // Cache the results for use by the preset system and window sizing.
     setBrowserChrome(dimensions.chromeWidth, dimensions.chromeHeight);
-    setMaxSupportedViewport(maxWidth, maxHeight);
+
+    // In Docker with x11grab, report the full screen as the max viewport — x11grab captures the screen, not the content area.
+    if(process.env.PRISMCAST_CONTAINER === "1") {
+
+      setMaxSupportedViewport(dimensions.availWidth, dimensions.availHeight);
+    } else {
+
+      setMaxSupportedViewport(maxWidth, maxHeight);
+    }
 
     LOG.debug("browser", "Display detection complete: screen %s\u00d7%s, chrome %s\u00d7%s, max viewport %s\u00d7%s.",
       dimensions.availWidth, dimensions.availHeight,
@@ -659,13 +667,17 @@ async function detectDisplayDimensions(browser: Browser): Promise<void> {
       maxWidth, maxHeight);
 
     // Check if the configured preset needs to be degraded and warn the user.
-    const presetResult = getEffectivePreset(CONFIG);
+    // In Docker with x11grab, skip degradation — x11grab captures the full Xvfb screen, not Chrome's content area.
+    if(process.env.PRISMCAST_CONTAINER !== "1") {
 
-    if(presetResult.degraded && presetResult.maxViewport) {
+      const presetResult = getEffectivePreset(CONFIG);
 
-      LOG.warn("Display supports maximum %s\u00d7%s. Configured %s preset will use %s instead.",
-        presetResult.maxViewport.width, presetResult.maxViewport.height,
-        presetResult.configuredPreset.id, presetResult.effectivePreset.id);
+      if(presetResult.degraded && presetResult.maxViewport) {
+
+        LOG.warn("Display supports maximum %s\u00d7%s. Configured %s preset will use %s instead.",
+          presetResult.maxViewport.width, presetResult.maxViewport.height,
+          presetResult.configuredPreset.id, presetResult.effectivePreset.id);
+      }
     }
   } catch(error) {
 
