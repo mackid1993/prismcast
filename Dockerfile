@@ -121,6 +121,11 @@ RUN printf '#!/bin/bash\nexec /usr/bin/google-chrome-stable --no-sandbox --disab
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# Configure openbox to remove all window decorations (title bar, borders). Without this, openbox adds
+# a gray title bar that shows up in x11grab capture.
+RUN mkdir -p /root/.config/openbox
+COPY openbox-rc.xml /root/.config/openbox/rc.xml
+
 # Create the VNC password directory. Users can mount a password file here for authenticated VNC access.
 RUN mkdir -p /root/.vnc
 
