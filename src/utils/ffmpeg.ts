@@ -341,7 +341,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "!", "mux.",
     "pulsesrc",
     "!", "audioconvert",
-    "!", "voaacenc", "bitrate=" + String(audioBitrate),
+    "!", "avenc_aac",
     "!", "aacparse",
     "!", "queue",
     "!", "mux."
@@ -448,6 +448,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
 
     if((code !== null) && (code !== 0)) {
 
+      LOG.error("%sGStreamer exited with code %d.", logPrefix, code);
       onError(new Error("GStreamer exited with code " + String(code) + "."));
     }
   });
