@@ -610,7 +610,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         // on a pipe doesn't work — FFmpeg's h264 demuxer can't reliably detect frame boundaries in
         // streaming mode, producing 0.10s segments regardless of -framerate or AUD injection.
         const { createMpegTsMuxer } = await import("../utils/mpegts.js");
-        const tsMuxer = createMpegTsMuxer(CONFIG.streaming.frameRate);
+        const tsMuxer = createMpegTsMuxer();
         let h264FrameCount = 0;
 
         rawCaptureStream.on("data", (data: Buffer) => {

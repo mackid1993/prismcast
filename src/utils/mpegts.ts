@@ -55,11 +55,11 @@ export interface MpegTsMuxer {
  * @param frameRate - Frames per second for PTS calculation (90kHz clock).
  * @returns Muxer with a `mux()` method that returns MPEG-TS packets for each frame.
  */
-export function createMpegTsMuxer(frameRate: number): MpegTsMuxer {
+export function createMpegTsMuxer(): MpegTsMuxer {
 
-  let frameCount = 0;
   let videoContinuity = 0;
   let patContinuity = 0;
+  const startTime = Date.now();
 
   const mux = (h264Frame: Buffer, isKeyframe: boolean): Buffer => {
 
@@ -74,10 +74,9 @@ export function createMpegTsMuxer(frameRate: number): MpegTsMuxer {
       patContinuity = (patContinuity + 1) & 0x0f;
     }
 
-    // Calculate PTS in 90kHz clock units.
-    const pts = Math.round(frameCount * 90000 / frameRate);
-
-    frameCount++;
+    // Calculate PTS from wall-clock time (90kHz clock). Don't assume a fixed framerate —
+    // Chrome's WebRTC encoder may produce variable frame rates.
+    const pts = Math.round((Date.now() - startTime) * 90);
 
     // Build PES packet: header + H264 data.
     const pesHeader = buildPESHeader(pts);
