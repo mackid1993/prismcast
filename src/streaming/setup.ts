@@ -4,6 +4,7 @@
  */
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
+import { execSync } from "node:child_process";
 import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext,
   spawnFFmpeg, spawnGstreamerCapture, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
@@ -474,9 +475,8 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // For FFmpeg mode, spawn FFmpeg to transcode the WebM stream to fMP4. FFmpeg copies the H264 video and transcodes Opus audio to AAC.
     if(useFFmpeg) {
 
-      // In Docker containers, use GStreamer to capture video directly from the Xvfb display at an exact constant frame rate, bypassing Chrome's MediaRecorder entirely
-      // for video. MediaRecorder on Linux drops frames due to its software encoder — GStreamer reads pixels from the framebuffer at precisely the target rate. Audio still
-      // comes from puppeteer-stream's MediaRecorder (audio-only) piped to FFmpeg. On macOS/bare metal, the standard MediaRecorder pipeline is used unchanged.
+      // In Docker, use GStreamer to capture video+audio directly from Xvfb+PulseAudio, bypassing MediaRecorder.
+      // On macOS/bare metal, the standard MediaRecorder pipeline is used unchanged.
       const useGStreamer = process.env.PRISMCAST_CONTAINER === "1";
 
       if(useGStreamer) {
@@ -489,6 +489,21 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.audioBitsPerSecond, (error) => {
 
             LOG.error("GStreamer FFmpeg error: %s.", formatError(error));
+
+            // Force-destroy the capture stream and close the tab to release tab capture immediately.
+            // Without this, a GStreamer crash leaves the tab locked and blocks all future streams.
+            if(rawCaptureStream && !rawCaptureStream.destroyed) {
+
+              rawCaptureStream.destroy();
+            }
+
+            try {
+
+              execSync("xdotool key ctrl+w", { env: { ...process.env, DISPLAY: display } });
+            } catch {
+
+              // Best-effort tab close.
+            }
 
             if(onFFmpegError) {
 
@@ -741,8 +756,6 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     // Also send F11 via xdotool for true fullscreen (hides address bar). Openbox must be running to handle it.
     try {
 
-      const { execSync } = await import("node:child_process");
-
       execSync("xdotool key F11", { env: { ...process.env, DISPLAY: process.env.DISPLAY ?? ":99" } });
       await delay(500);
     } catch {
@@ -990,7 +1003,7 @@ export async function setupStream(options: StreamSetupOptions, onCircuitBreak: (
       // In Docker/GStreamer mode, kill GStreamer+FFmpeg BEFORE destroying the capture stream — GStreamer must release
       // the X11 display before puppeteer-stream can clean up. On other platforms, destroy the capture stream first
       // (original order) so puppeteer-stream's STOP_RECORDING fires while the browser is still connected.
-      if(process.env.PRISMCAST_CONTAINER === "1" && ffmpegProcess) {
+      if((process.env.PRISMCAST_CONTAINER === "1") && ffmpegProcess) {
 
         ffmpegProcess.kill();
       }

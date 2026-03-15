@@ -303,9 +303,8 @@ export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => voi
 }
 
 /**
- * Spawns an FFmpeg process that captures video directly from the X11 display via GStreamer and receives audio via pipe. This bypasses Chrome's MediaRecorder entirely
- * for video — GStreamer reads pixels from the Xvfb framebuffer at an exact constant frame rate, then h264_vaapi hardware-encodes them. Audio comes from puppeteer-stream's
- * MediaRecorder (audio-only WebM/Opus) piped to fd 3. The result is perfectly constant frame rate video with no dropped or duplicated frames.
+ * Spawns GStreamer for GPU-accelerated screen+audio capture, piped to FFmpeg for fMP4 muxing. GStreamer captures video via ximagesrc and audio via pulsesrc,
+ * encodes H264 via VA-API and AAC, outputs MPEG-TS. FFmpeg copies both streams to fMP4. Docker only.
  *
  * @param display - X11 display identifier (e.g., ":99").
  * @param width - Capture width in pixels.
