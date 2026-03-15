@@ -375,7 +375,7 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
  * @param comment - Optional metadata comment.
  * @returns FFmpeg process with audioPipe (fd 3) for audio input, stdout for fMP4 output.
  */
-export function spawnX11GrabFFmpeg(display: string, width: number, height: number, offsetY: number, frameRate: number,
+export function spawnX11GrabFFmpeg(display: string, width: number, height: number, frameRate: number,
   videoBitrate: number, audioBitrate: number, onError: (error: Error) => void, streamId?: string,
   comment?: string): FFmpegProcess {
 
@@ -390,13 +390,11 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: x11grab video from the content area of Chrome's window, skipping the browser chrome (toolbar/tabs).
-    // Capture exactly viewport dimensions starting at (0, offsetY) where offsetY = browser chrome height.
+    // Input 0: x11grab captures the full Xvfb screen. scale_vaapi on the GPU scales to output dimensions.
     "-f", "x11grab",
     "-draw_mouse", "0",
     "-framerate", String(frameRate),
-    "-video_size", String(width) + "x" + String(height),
-    "-i", display + "+0," + String(offsetY),
+    "-i", display,
     // Input 1: WebM from puppeteer-stream via fd 3 (contains video+audio, we only use audio).
     "-f", "webm",
     "-i", "pipe:3",

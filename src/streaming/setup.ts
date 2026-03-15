@@ -485,7 +485,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         const viewport = getEffectiveViewport(CONFIG);
 
         // In kiosk mode (Docker), chrome height is 0 — no browser UI visible.
-        const ffmpeg = spawnX11GrabFFmpeg(display, viewport.width, viewport.height, 0, CONFIG.streaming.frameRate,
+        const ffmpeg = spawnX11GrabFFmpeg(display, viewport.width, viewport.height, CONFIG.streaming.frameRate,
           CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.audioBitsPerSecond, (error) => {
 
             LOG.error("x11grab FFmpeg error: %s.", formatError(error));
