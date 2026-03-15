@@ -216,15 +216,17 @@ export function getEffectivePreset(config: Config): EffectivePresetResult {
   const configuredPreset = VIDEO_QUALITY_PRESETS.find((p) => p.id === config.streaming.qualityPreset) ?? VIDEO_QUALITY_PRESETS[1];
   const maxViewport = getMaxSupportedViewport();
 
-  // If display detection hasn't completed yet, use configured preset without degradation.
-  if(!maxViewport) {
+  // In Docker with x11grab, bypass viewport validation. x11grab captures the Xvfb screen directly — the preset
+  // should match the Xvfb resolution, not Chrome's content area (which is smaller due to toolbar height).
+  // Without this bypass, PrismCast downgrades 1080p to 720p because Chrome's content area is ~1000px on a 1080p screen.
+  if(!maxViewport || (process.env.PRISMCAST_CONTAINER === "1")) {
 
     return {
 
       configuredPreset,
       degraded: false,
       effectivePreset: configuredPreset,
-      maxViewport: null
+      maxViewport: maxViewport ?? null
     };
   }
 
