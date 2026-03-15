@@ -555,7 +555,6 @@ export function spawnMpegTsRemuxer(onError: (error: Error) => void, streamId?: s
     "-pat_period", "0.1",
     "-pcr_period", "40",
     "-flush_packets", "1",
-    "-max_muxing_queue_size", "1024",
     "pipe:1"
   ];
 
