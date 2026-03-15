@@ -489,7 +489,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
 
     if(!gst.killed) {
 
-      gst.kill("SIGTERM");
+      gst.kill("SIGKILL");
     }
 
     if(!ffmpeg.killed) {
