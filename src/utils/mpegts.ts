@@ -10,6 +10,33 @@ const PMT_PID = 0x1000;
 const VIDEO_PID = 0x0100;
 const STREAM_TYPE_H264 = 0x1b;
 
+// MPEG CRC32 lookup table — must be initialized before buildPAT/buildPMT which use crc32().
+const CRC32_TABLE = new Uint32Array(256);
+
+for(let i = 0; i < 256; i++) {
+
+  let crc = i << 24;
+
+  for(let j = 0; j < 8; j++) {
+
+    crc = (crc & 0x80000000) ? ((crc << 1) ^ 0x04c11db7) : (crc << 1);
+  }
+
+  CRC32_TABLE[i] = crc >>> 0;
+}
+
+function crc32(buffer: Buffer, start: number, end: number): number {
+
+  let crc = 0xffffffff;
+
+  for(let i = start; i < end; i++) {
+
+    crc = (CRC32_TABLE[((crc >>> 24) ^ buffer[i]) & 0xff] ^ (crc << 8)) >>> 0;
+  }
+
+  return crc >>> 0;
+}
+
 // Pre-built PAT and PMT packets (fixed for single-program, single-H264-stream).
 const PAT_PACKET = buildPAT();
 const PMT_PACKET = buildPMT();
@@ -280,29 +307,4 @@ function setPMTContinuity(cc: number): Buffer {
   return packet;
 }
 
-// MPEG CRC32 lookup table.
-const CRC32_TABLE = new Uint32Array(256);
-
-for(let i = 0; i < 256; i++) {
-
-  let crc = i << 24;
-
-  for(let j = 0; j < 8; j++) {
-
-    crc = (crc & 0x80000000) ? ((crc << 1) ^ 0x04c11db7) : (crc << 1);
-  }
-
-  CRC32_TABLE[i] = crc >>> 0;
-}
-
-function crc32(buffer: Buffer, start: number, end: number): number {
-
-  let crc = 0xffffffff;
-
-  for(let i = start; i < end; i++) {
-
-    crc = (CRC32_TABLE[((crc >>> 24) ^ buffer[i]) & 0xff] ^ (crc << 8)) >>> 0;
-  }
-
-  return crc >>> 0;
-}
+// CRC32 table and function are defined at the top of the file (before PAT/PMT initialization).
