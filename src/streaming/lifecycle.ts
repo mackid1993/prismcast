@@ -148,17 +148,22 @@ export function terminateStream(streamId: number, channelName: string, reason: s
     unregisterAbortController(streamInfo.streamIdStr);
   }
 
-  // Destroy the raw capture stream BEFORE killing FFmpeg or closing the page. This triggers puppeteer-stream's close handler while the browser is still connected,
-  // ensuring STOP_RECORDING is called and chrome.tabCapture releases the capture. Without this, subsequent getStream() calls may hang with "active stream" errors.
+  // In Docker/GStreamer mode, kill FFmpeg+GStreamer BEFORE destroying the capture stream — GStreamer must release
+  // the X11 display first. On other platforms, destroy capture stream first (original order).
+  if((process.env.PRISMCAST_CONTAINER === "1") && streamInfo?.ffmpegProcess) {
+
+    streamInfo.ffmpegProcess.kill();
+  }
+
+  // Destroy the raw capture stream. This triggers puppeteer-stream's close handler while the browser is still connected,
+  // ensuring STOP_RECORDING is called and chrome.tabCapture releases the capture.
   if(streamInfo) {
 
     destroyCaptureStream(streamInfo.rawCaptureStream);
   }
 
-  // Kill the FFmpeg process if using FFmpeg mode. This sets FFmpeg's internal shuttingDown flag, so when the segmenter stops (which closes the capture stream and
-  // FFmpeg's stdin), FFmpeg won't report spurious errors about truncated input. The order matters: kill() must be called before segmenter.stop() to set the flag
-  // before stdin closes.
-  if(streamInfo?.ffmpegProcess) {
+  // Kill FFmpeg on non-Docker platforms (original order).
+  if((process.env.PRISMCAST_CONTAINER !== "1") && streamInfo?.ffmpegProcess) {
 
     streamInfo.ffmpegProcess.kill();
   }
