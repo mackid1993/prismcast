@@ -727,19 +727,30 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
   if(process.env.PRISMCAST_CONTAINER === "1") {
 
-    // In Docker with x11grab, send F11 via xdotool to trigger true browser fullscreen (hides tabs and address bar).
-    // CDP windowState:fullscreen only maximizes — it doesn't hide Chrome's UI. xdotool sends F11 directly to X11.
-    try {
+    // In Docker with x11grab, position Chrome at (0,0) and size it to fill the entire Xvfb screen.
+    // Don't use fullscreen — just set exact position and dimensions so there's no offset or gap.
+    const screenWidth = parseInt(process.env.SCREEN_WIDTH ?? "1920", 10);
+    const screenHeight = parseInt(process.env.SCREEN_HEIGHT ?? "1080", 10);
 
-      const { execSync } = await import("node:child_process");
+    const cdpSession = await page.createCDPSession();
+    const windowInfo = await cdpSession.send("Browser.getWindowForTarget");
 
-      execSync("xdotool key F11", { env: { ...process.env, DISPLAY: process.env.DISPLAY ?? ":99" } });
-      await delay(500);
-      LOG.info("x11grab: sent F11 via xdotool for true fullscreen.");
-    } catch(err) {
+    // First set to normal state (can't resize a maximized/fullscreen window).
+    await cdpSession.send("Browser.setWindowBounds", {
 
-      LOG.warn("x11grab: xdotool F11 failed: %s. Install xdotool in Docker.", formatError(err));
-    }
+      bounds: { windowState: "normal" },
+      windowId: windowInfo.windowId
+    });
+
+    // Then set exact position and size to fill the entire Xvfb screen.
+    await cdpSession.send("Browser.setWindowBounds", {
+
+      bounds: { height: screenHeight, left: 0, top: 0, width: screenWidth },
+      windowId: windowInfo.windowId
+    });
+
+    await cdpSession.detach();
+    LOG.info("x11grab: Chrome window positioned at (0,0), sized %dx%d.", screenWidth, screenHeight);
   } else {
 
     await resizeAndMinimizeWindow(page, !profile.noVideo);
