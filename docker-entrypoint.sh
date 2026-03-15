@@ -110,6 +110,11 @@ if ! kill -0 $XVFB_PID 2>/dev/null; then
 fi
 echo "Xvfb started successfully (DRI3: ${VFBCOMMAND:-disabled})."
 
+# Start PulseAudio for GStreamer audio capture. Chrome outputs audio to PulseAudio,
+# GStreamer captures it via pulsesrc — no MediaRecorder audio needed.
+pulseaudio --start --exit-idle-time=-1
+echo "PulseAudio started."
+
 # Start openbox window manager. Required for Chrome fullscreen (F11) to work — without a WM,
 # fullscreen requests have nothing to handle them and Chrome keeps its address bar visible.
 openbox --sm-disable &

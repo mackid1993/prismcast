@@ -25,7 +25,9 @@ RUN apt-get update && apt-get install -y \
     xauth \
     # noVNC for web-based VNC access.
     novnc \
-    # Lightweight window manager and X11 automation for x11grab fullscreen.
+    # PulseAudio for GStreamer audio capture from Chrome.
+    pulseaudio \
+    # Lightweight window manager and X11 automation for fullscreen.
     openbox \
     xdotool \
     # GStreamer for GPU-accelerated screen capture (ximagesrc + vaapih264enc).

@@ -518,30 +518,9 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
           }
         });
 
-        // Pipe the capture stream (audio-only WebM from MediaRecorder) to FFmpeg's audio pipe (fd 3).
-        rawCaptureStream.on("data", (chunk: Buffer) => {
-
-          if(ffmpeg.audioPipe) {
-
-            ffmpeg.audioPipe.write(chunk);
-          }
-        });
-
-        rawCaptureStream.on("end", () => {
-
-          if(ffmpeg.audioPipe) {
-
-            ffmpeg.audioPipe.end();
-          }
-        });
-
-        rawCaptureStream.on("close", () => {
-
-          if(ffmpeg.audioPipe) {
-
-            ffmpeg.audioPipe.end();
-          }
-        });
+        // GStreamer captures audio directly from PulseAudio — no MediaRecorder audio piping needed.
+        // The rawCaptureStream (MediaRecorder) is still active for puppeteer-stream lifecycle management
+        // but its data is not used.
 
         LOG.info("Using GStreamer capture from %s (%dx%d@%dfps).", display, viewport.width, viewport.height, CONFIG.streaming.frameRate);
 

@@ -326,8 +326,8 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
   const logPrefix = streamId ? "[" + streamId + "] " : "";
   let shuttingDown = false;
 
-  // GStreamer pipeline: ximagesrc captures Xvfb, vaapipostproc converts to VA surface, vaapih264enc encodes on GPU.
-  // Output MPEG-TS to stdout — FFmpeg reads this for audio muxing.
+  // GStreamer pipeline: ximagesrc captures video from Xvfb, pulsesrc captures audio from PulseAudio (Chrome's audio output).
+  // Both are encoded on the GPU (H264 via VA-API) and muxed into MPEG-TS. Single process, single clock = perfect A/V sync.
   const gstPipeline = [
     "ximagesrc", "display-name=" + display, "remote=true", "use-damage=false", "show-pointer=false",
     "!", "video/x-raw,framerate=" + String(frameRate) + "/1",
@@ -337,40 +337,36 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "keyframe-period=" + String(frameRate * 2),
     "!", "video/x-h264,profile=main",
     "!", "h264parse",
-    "!", "mpegtsmux",
+    "!", "mux.",
+    "pulsesrc",
+    "!", "audioconvert",
+    "!", "avenc_aac", "bitrate=" + String(audioBitrate),
+    "!", "aacparse",
+    "!", "mux.",
+    "mpegtsmux", "name=mux",
     "!", "fdsink", "fd=1"
   ];
 
-  LOG.info("%sGStreamer capture: %dx%d@%dfps, bitrate=%dk.", logPrefix, width, height, frameRate, Math.round(videoBitrate / 1000));
+  LOG.info("%sGStreamer capture: %dx%d@%dfps, video=%dk, audio=%dk (PulseAudio).",
+    logPrefix, width, height, frameRate, Math.round(videoBitrate / 1000), Math.round(audioBitrate / 1000));
 
-  // Spawn gst-launch-1.0 for video capture. stdout = MPEG-TS H264 stream.
+  // Spawn gst-launch-1.0 for video+audio capture. stdout = MPEG-TS with H264+AAC.
   const gst = spawn("gst-launch-1.0", gstPipeline, {
 
     env: { ...process.env, DISPLAY: display },
     stdio: [ "ignore", "pipe", "pipe" ]
   });
 
-  // Spawn FFmpeg to mux GStreamer's MPEG-TS video with MediaRecorder's WebM audio.
-  // Input 0: MPEG-TS from GStreamer (pipe:0). Input 1: WebM audio from MediaRecorder (pipe:3).
+  // FFmpeg just remuxes MPEG-TS (H264+AAC) to fMP4. Both streams are already encoded — copy only, zero CPU.
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
     "-fflags", "nobuffer",
-    "-itsoffset", "1",
     "-f", "mpegts",
     "-i", "pipe:0",
-    "-thread_queue_size", "512",
-    "-fflags", "nobuffer",
-    "-f", "webm",
-    "-i", "pipe:3",
-    "-map", "0:v",
-    "-map", "1:a",
     "-c:v", "copy",
-    "-c:a", "aac",
-    "-b:a", String(audioBitrate),
-    "-af", "aresample=async=1",
-    "-max_interleave_delta", "0",
+    "-c:a", "copy",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-frag_duration", "1000000",
@@ -386,10 +382,10 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
 
   const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
 
-    stdio: [ "pipe", "pipe", "pipe", "pipe" ]
+    stdio: [ "pipe", "pipe", "pipe" ]
   });
 
-  // Pipe GStreamer MPEG-TS output to FFmpeg stdin.
+  // Pipe GStreamer MPEG-TS output (video+audio) to FFmpeg stdin.
   gst.stdout.pipe(ffmpeg.stdin);
 
   // Log GStreamer stderr.
@@ -500,11 +496,8 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     }
   };
 
-  const audioPipe = ffmpeg.stdio[3] as Writable;
-
   return {
 
-    audioPipe,
     kill,
     process: ffmpeg,
     stdin: ffmpeg.stdin,
