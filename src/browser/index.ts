@@ -528,7 +528,6 @@ export function buildLaunchOptions(): LaunchOptions {
       "--no-first-run",
       // In Docker with x11grab, use kiosk mode to hide all browser chrome (address bar, tabs, window decorations).
       // x11grab captures the framebuffer directly — any visible UI ends up in the output.
-      ...(process.env.PRISMCAST_CONTAINER === "1" ? ["--kiosk"] : []),
       [ "--window-size=", String(getPresetViewport(CONFIG).width), ",", String(getPresetViewport(CONFIG).height) ].join("")
     ],
 

@@ -110,6 +110,13 @@ if ! kill -0 $XVFB_PID 2>/dev/null; then
 fi
 echo "Xvfb started successfully (DRI3: ${VFBCOMMAND:-disabled})."
 
+# Start openbox window manager. Required for Chrome fullscreen (F11) to work — without a WM,
+# fullscreen requests have nothing to handle them and Chrome keeps its address bar visible.
+openbox --sm-disable &
+OPENBOX_PID=$!
+sleep 1
+echo "Openbox window manager started."
+
 # Start x11vnc (VNC server for the virtual display).
 echo "Starting x11vnc..."
 if [ -f /root/.vnc/passwd ]; then

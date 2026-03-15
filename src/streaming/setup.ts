@@ -725,9 +725,25 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     throw error;
   }
 
-  // In Docker with kiosk mode, don't minimize — x11grab needs the content visible. Kiosk mode fills the screen automatically.
-  // On other platforms, resize to viewport + chrome and minimize for MediaRecorder capture.
-  await resizeAndMinimizeWindow(page, (process.env.PRISMCAST_CONTAINER !== "1") && !profile.noVideo);
+  if(process.env.PRISMCAST_CONTAINER === "1") {
+
+    // In Docker with x11grab, set Chrome to fullscreen (F11) so it fills the entire Xvfb screen with no browser chrome.
+    // Requires openbox window manager — without a WM, fullscreen requests are ignored.
+    const cdpSession = await page.createCDPSession();
+    const windowInfo = await cdpSession.send("Browser.getWindowForTarget");
+
+    await cdpSession.send("Browser.setWindowBounds", {
+
+      bounds: { windowState: "fullscreen" },
+      windowId: windowInfo.windowId
+    });
+
+    await cdpSession.detach();
+    LOG.info("x11grab: Chrome set to fullscreen via openbox WM.");
+  } else {
+
+    await resizeAndMinimizeWindow(page, !profile.noVideo);
+  }
 
   LOG.debug("timing:startup", "Page with capture ready. Total: %sms.", captureElapsed());
 

@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y \
     xauth \
     # noVNC for web-based VNC access.
     novnc \
+    # Lightweight window manager for x11grab fullscreen support.
+    openbox \
     # Chrome dependencies.
     libasound2t64 \
     libatk1.0-0 \
