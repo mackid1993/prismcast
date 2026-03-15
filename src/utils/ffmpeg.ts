@@ -340,7 +340,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "!", "mux.",
     "pulsesrc",
     "!", "audioconvert",
-    "!", "avenc_aac", "bitrate=" + String(audioBitrate),
+    "!", "voaacenc", "bitrate=" + String(audioBitrate),
     "!", "aacparse",
     "!", "mux.",
     "mpegtsmux", "name=mux",

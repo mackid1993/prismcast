@@ -36,6 +36,8 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-vaapi \
+    gstreamer1.0-libav \
+    gstreamer1.0-pulseaudio \
     libgstreamer1.0-0 \
     # Chrome dependencies.
     libasound2t64 \

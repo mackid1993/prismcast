@@ -1,0 +1,29 @@
+services:
+  prismcast:
+    image: ghcr.io/mackid1993/prismcast:${TAG:-latest}
+    container_name: prismcast
+    hostname: prismcast
+    shm_size: ${SHM_SIZE:-2gb}
+    devices:
+      - /dev/dri:/dev/dri
+    ports:
+      - ${PORT:-5589}:${PORT:-5589}
+      - ${VNC_PORT:-5900}:${VNC_PORT:-5900}
+      - ${NOVNC_PORT:-6080}:${NOVNC_PORT:-6080}
+      - ${HDHR_PORT:-5004}:${HDHR_PORT:-5004}
+    environment:
+      - PORT=${PORT:-5589}
+      - VNC_PORT=${VNC_PORT:-5900}
+      - NOVNC_PORT=${NOVNC_PORT:-6080}
+      - HDHR_PORT=${HDHR_PORT:-5004}
+      - SCREEN_WIDTH=${SCREEN_WIDTH:-1920}
+      - SCREEN_HEIGHT=${SCREEN_HEIGHT:-1080}
+    volumes:
+      - /mnt/user/appdata/prismcast:/root/.prismcast
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${PORT:-5589}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
