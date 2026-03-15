@@ -541,7 +541,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
       } else {
 
         // macOS / bare metal: standard MediaRecorder pipeline. Video copies through unchanged; audio is transcoded Opus→AAC.
-        const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.frameRate, (error) => {
+        const ffmpeg = spawnFFmpeg(CONFIG.streaming.audioBitsPerSecond, (error) => {
 
           LOG.error("FFmpeg process error: %s.", formatError(error));
 

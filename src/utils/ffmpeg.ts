@@ -180,53 +180,27 @@ export interface FFmpegProcess {
  * @param comment - Optional comment metadata (channel name or domain) to embed in the output.
  * @returns FFmpeg process wrapper with stdin, stdout, and kill function.
  */
-export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRate: number,
-  onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
+export function spawnFFmpeg(audioBitrate: number, onError: (error: Error) => void, streamId?: string, comment?: string): FFmpegProcess {
 
-  // On Linux with VA-API hardware, use the system FFmpeg (which has VA-API compiled in) for hardware re-encoding. The bundled ffmpeg-for-homebridge doesn't
-  // have VA-API support. On macOS (VideoToolbox MediaRecorder = perfect 60fps), just copy the video through — no re-encode needed.
-  const useVaapi = (process.platform === "linux") && existsSync("/dev/dri/renderD128");
-  const ffmpegPath = useVaapi ? "ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
-
+  const ffmpegPath = cachedFFmpegPath ?? "ffmpeg";
   const aacEncoder = process.platform === "darwin" ? "aac_at" : "aac";
+  const isDocker = process.env.PRISMCAST_CONTAINER === "1";
 
   const ffmpegArgs = [
     "-hide_banner",
-    "-loglevel", "info",
-    "-progress", "pipe:2",
+    "-loglevel", "warning",
     "-probesize", "16384",
-    "-i", "pipe:0"
-  ];
-
-  if(useVaapi) {
-
-    // VA-API hardware re-encode: decode the WebM H264, re-encode via Quick Sync at the target frame rate and bitrate. This converts Chrome's VFR output with
-    // dropped frames into perfect CFR output — the hardware encoder is fast enough that speed is never a concern.
-    ffmpegArgs.push(
-      "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", "format=nv12,hwupload",
-      "-c:v", "h264_vaapi",
-      "-bf", "0",
-      "-r", String(frameRate),
-      "-b:v", String(videoBitrate),
-      "-maxrate", String(videoBitrate),
-      "-bufsize", String(videoBitrate * 2)
-    );
-  } else {
-
-    // macOS or no GPU: copy video through unchanged. macOS MediaRecorder uses VideoToolbox which already produces perfect CFR.
-    ffmpegArgs.push("-c:v", "copy");
-  }
-
-  ffmpegArgs.push(
+    "-i", "pipe:0",
+    "-c:v", "copy",
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
-    "-af", "aresample=async=1",
+    // Docker: A/V sync fix and fragment duration cap. Gated to avoid changing behavior on other platforms.
+    ...(isDocker ? [ "-af", "aresample=async=1", "-max_interleave_delta", "0" ] : []),
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
-    "-flush_packets", "1",
-    "-max_muxing_queue_size", "1024"
-  );
+    ...(isDocker ? [ "-frag_duration", "1000000" ] : []),
+    "-flush_packets", "1"
+  ];
 
   // Add metadata comment if provided. This embeds "PrismCast - <channel>" in the output for identification.
   if(comment) {
