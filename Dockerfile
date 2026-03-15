@@ -28,6 +28,13 @@ RUN apt-get update && apt-get install -y \
     # Lightweight window manager and X11 automation for x11grab fullscreen.
     openbox \
     xdotool \
+    # GStreamer for GPU-accelerated screen capture (ximagesrc + vaapih264enc).
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-vaapi \
+    libgstreamer1.0-0 \
     # Chrome dependencies.
     libasound2t64 \
     libatk1.0-0 \

@@ -5,7 +5,7 @@
 import type { Channel, Nullable, ResolvedSiteProfile, UrlValidation } from "../types/index.js";
 import type { Frame, Page } from "puppeteer-core";
 import { LOG, delay, extractDomain, formatError, registerAbortController, retryOperation, runWithStreamContext,
-  spawnFFmpeg, spawnX11GrabFFmpeg, startTimer } from "../utils/index.js";
+  spawnFFmpeg, spawnGstreamerCapture, startTimer } from "../utils/index.js";
 import type { RecoveryMetrics, TabReplacementResult } from "./recovery.js";
 import { getCurrentBrowser, getStream, minimizeBrowserWindow, registerManagedPage, unregisterManagedPage } from "../browser/index.js";
 import { getNextStreamId, getStreamCount } from "./registry.js";
@@ -485,7 +485,7 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
         const viewport = getEffectiveViewport(CONFIG);
 
         // In kiosk mode (Docker), chrome height is 0 — no browser UI visible.
-        const ffmpeg = spawnX11GrabFFmpeg(display, viewport.width, viewport.height, CONFIG.streaming.frameRate,
+        const ffmpeg = spawnGstreamerCapture(display, viewport.width, viewport.height, CONFIG.streaming.frameRate,
           CONFIG.streaming.videoBitsPerSecond, CONFIG.streaming.audioBitsPerSecond, (error) => {
 
             LOG.error("x11grab FFmpeg error: %s.", formatError(error));
@@ -750,7 +750,20 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
     });
 
     await cdpSession.detach();
-    LOG.info("x11grab: Chrome window positioned at (0,0), sized %dx%d.", screenWidth, screenHeight);
+
+    // Also send F11 via xdotool for true fullscreen (hides address bar). Openbox must be running to handle it.
+    try {
+
+      const { execSync } = await import("node:child_process");
+
+      execSync("xdotool key F11", { env: { ...process.env, DISPLAY: process.env.DISPLAY ?? ":99" } });
+      await delay(500);
+    } catch {
+
+      // xdotool F11 is best-effort — window positioning above handles sizing.
+    }
+
+    LOG.info("GStreamer capture: Chrome window positioned at (0,0), sized %dx%d.", screenWidth, screenHeight);
   } else {
 
     await resizeAndMinimizeWindow(page, !profile.noVideo);

@@ -375,74 +375,61 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
  * @param comment - Optional metadata comment.
  * @returns FFmpeg process with audioPipe (fd 3) for audio input, stdout for fMP4 output.
  */
-export function spawnX11GrabFFmpeg(display: string, width: number, height: number, frameRate: number,
+export function spawnGstreamerCapture(display: string, width: number, height: number, frameRate: number,
   videoBitrate: number, audioBitrate: number, onError: (error: Error) => void, streamId?: string,
   comment?: string): FFmpegProcess {
 
-  // Use system FFmpeg for VA-API support. Fall back to bundled FFmpeg with software encoding.
-  const useVaapi = existsSync("/dev/dri/renderD128") && existsSync("/usr/bin/ffmpeg");
-  const ffmpegPath = useVaapi ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
+  const ffmpegPath = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : (cachedFFmpegPath ?? "ffmpeg");
+  const logPrefix = streamId ? "[" + streamId + "] " : "";
+  let shuttingDown = false;
 
-  LOG.info("x11grab using %s (VA-API: %s).", ffmpegPath, useVaapi ? "yes" : "no");
-  const aacEncoder = "aac";
+  // GStreamer pipeline: ximagesrc captures Xvfb, vaapipostproc converts to VA surface, vaapih264enc encodes on GPU.
+  // Output MPEG-TS to stdout — FFmpeg reads this for audio muxing.
+  const gstPipeline = [
+    "ximagesrc", "display-name=" + display, "remote=true", "use-damage=false",
+    "!", "video/x-raw,framerate=" + String(frameRate) + "/1",
+    "!", "vaapipostproc",
+    "!", "vaapih264enc",
+    "bitrate=" + String(Math.round(videoBitrate / 1000)),
+    "keyframe-period=" + String(frameRate * 2),
+    "!", "video/x-h264,profile=main",
+    "!", "h264parse",
+    "!", "mpegtsmux",
+    "!", "fdsink", "fd=1"
+  ];
 
+  LOG.info("%sGStreamer capture: %dx%d@%dfps, bitrate=%dk.", logPrefix, width, height, frameRate, Math.round(videoBitrate / 1000));
+
+  // Spawn gst-launch-1.0 for video capture. stdout = MPEG-TS H264 stream.
+  const gst = spawn("gst-launch-1.0", gstPipeline, {
+
+    env: { ...process.env, DISPLAY: display },
+    stdio: [ "ignore", "pipe", "pipe" ]
+  });
+
+  // Spawn FFmpeg to mux GStreamer's MPEG-TS video with MediaRecorder's WebM audio.
+  // Input 0: MPEG-TS from GStreamer (pipe:0). Input 1: WebM audio from MediaRecorder (pipe:3).
   const ffmpegArgs = [
     "-hide_banner",
     "-loglevel", "info",
     "-progress", "pipe:2",
-    // Input 0: x11grab captures the full Xvfb screen. thread_queue_size prevents frame drops from input buffering.
-    "-thread_queue_size", "512",
-    "-f", "x11grab",
-    "-draw_mouse", "0",
-    "-framerate", String(frameRate),
-    "-i", display,
-    // Input 1: WebM from puppeteer-stream via fd 3 (contains video+audio, we only use audio).
+    "-f", "mpegts",
+    "-i", "pipe:0",
     "-thread_queue_size", "512",
     "-f", "webm",
     "-i", "pipe:3",
-    // Explicit mapping: video from x11grab, audio from WebM. Without this, FFmpeg might pick the wrong video stream.
     "-map", "0:v",
-    "-map", "1:a"
-  ];
-
-  // Video encoding. Upload raw pixels to GPU first, then scale on GPU — avoids CPU-side crop/resize
-  // which bottlenecks at ~50fps on 2160x1440 input. scale_vaapi runs entirely on the iGPU.
-  if(useVaapi) {
-
-    ffmpegArgs.push(
-      "-vaapi_device", "/dev/dri/renderD128",
-      "-vf", "format=nv12,hwupload",
-      "-c:v", "h264_vaapi",
-      "-threads", "4",
-      "-bf", "0",
-      "-b:v", String(videoBitrate),
-      "-maxrate", String(videoBitrate),
-      "-bufsize", String(videoBitrate * 2)
-    );
-  } else {
-
-    ffmpegArgs.push(
-      "-vf", "scale=" + String(width) + ":" + String(height),
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-bf", "0",
-      "-b:v", String(videoBitrate),
-      "-maxrate", String(videoBitrate),
-      "-bufsize", String(videoBitrate * 2)
-    );
-  }
-
-  // Audio encoding + output.
-  ffmpegArgs.push(
-    "-c:a", aacEncoder,
+    "-map", "1:a",
+    "-c:v", "copy",
+    "-c:a", "aac",
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
+    "-max_interleave_delta", "0",
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
     "-frag_duration", "1000000",
-    "-flush_packets", "1",
-    "-max_muxing_queue_size", "4096"
-  );
+    "-flush_packets", "1"
+  ];
 
   if(comment) {
 
@@ -451,19 +438,35 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
 
   ffmpegArgs.push("pipe:1");
 
-  // fd 3 = audio pipe input.
   const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
 
-    stdio: [ "ignore", "pipe", "pipe", "pipe" ]
+    stdio: [ "pipe", "pipe", "pipe", "pipe" ]
   });
 
-  const logPrefix = streamId ? "[" + streamId + "] " : "";
-  let shuttingDown = false;
+  // Pipe GStreamer MPEG-TS output to FFmpeg stdin.
+  gst.stdout.pipe(ffmpeg.stdin);
+
+  // Log GStreamer stderr.
+  gst.stderr.on("data", (data: Buffer) => {
+
+    if(shuttingDown) {
+
+      return;
+    }
+
+    const message = data.toString().trim();
+
+    if(message.length > 0) {
+
+      LOG.debug("streaming:gstreamer", "%sGStreamer: %s", logPrefix, message);
+    }
+  });
+
+  // Log FFmpeg stderr (progress stats).
   let lastProgressLog = Date.now();
   const progressStats: Record<string, string> = {};
 
-  // Log FFmpeg stderr output. stderr is guaranteed non-null since stdio[2] is "pipe".
-  ffmpeg.stderr!.on("data", (data: Buffer) => {
+  ffmpeg.stderr.on("data", (data: Buffer) => {
 
     if(shuttingDown) {
 
@@ -486,28 +489,24 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
 
     if((now - lastProgressLog) >= 5000) {
 
-      const frame = progressStats.frame || "?";
-      const fps = progressStats.fps || "?";
-      const speed = progressStats.speed || "?";
-      const bitrate = progressStats.bitrate || "?";
-      const drop = progressStats.drop_frames || "0";
+      LOG.info("%sGStreamer capture: frame=%s fps=%s speed=%s bitrate=%s dropped=%s",
+        logPrefix, progressStats.frame || "?", progressStats.fps || "?",
+        progressStats.speed || "?", progressStats.bitrate || "?", progressStats.drop_frames || "0");
 
-      LOG.info("%sx11grab: frame=%s fps=%s speed=%s bitrate=%s dropped=%s", logPrefix, frame, fps, speed, bitrate, drop);
       lastProgressLog = now;
     }
+  });
 
-    const noisePatterns = [ "Press [q] to stop", "frame=", "size=", "time=", "bitrate=", "speed=", "progress=" ];
+  gst.on("exit", (code, signal) => {
 
-    for(const line of message.split("\n")) {
+    if(shuttingDown || (signal === "SIGTERM")) {
 
-      const trimmed = line.trim();
+      return;
+    }
 
-      if((trimmed.length === 0) || trimmed.includes("=") || noisePatterns.some((p) => trimmed.includes(p))) {
+    if((code !== null) && (code !== 0)) {
 
-        continue;
-      }
-
-      LOG.debug("streaming:ffmpeg", "%sx11grab: %s", logPrefix, trimmed);
+      onError(new Error("GStreamer exited with code " + String(code) + "."));
     }
   });
 
@@ -520,26 +519,34 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
 
     if((code !== null) && (code !== 0)) {
 
-      onError(new Error("x11grab FFmpeg exited with code " + String(code) + "."));
-    } else if(signal) {
+      onError(new Error("GStreamer FFmpeg muxer exited with code " + String(code) + "."));
+    }
+  });
 
-      onError(new Error("x11grab FFmpeg killed by signal " + signal + "."));
+  gst.on("error", (error) => {
+
+    if(!shuttingDown) {
+
+      onError(error);
     }
   });
 
   ffmpeg.on("error", (error) => {
 
-    if(shuttingDown) {
+    if(!shuttingDown) {
 
-      return;
+      onError(error);
     }
-
-    onError(error);
   });
 
   const kill = (): void => {
 
     shuttingDown = true;
+
+    if(!gst.killed) {
+
+      gst.kill("SIGTERM");
+    }
 
     if(!ffmpeg.killed) {
 
@@ -554,8 +561,8 @@ export function spawnX11GrabFFmpeg(display: string, width: number, height: numbe
     audioPipe,
     kill,
     process: ffmpeg,
-    stdin: ffmpeg.stdin as unknown as Writable,
-    stdout: ffmpeg.stdout!
+    stdin: ffmpeg.stdin,
+    stdout: ffmpeg.stdout
   };
 }
 
