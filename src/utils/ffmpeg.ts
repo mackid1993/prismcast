@@ -221,12 +221,16 @@ export function spawnFFmpeg(audioBitrate: number, videoBitrate: number, frameRat
     ffmpegArgs.push("-c:v", "copy");
   }
 
+  const isDocker = process.env.PRISMCAST_CONTAINER === "1";
+
   ffmpegArgs.push(
     "-c:a", aacEncoder,
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
+    ...(isDocker ? [ "-max_interleave_delta", "0" ] : []),
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    ...(isDocker ? [ "-frag_duration", "1000000" ] : []),
     "-flush_packets", "1",
     "-max_muxing_queue_size", "1024"
   );
@@ -592,7 +596,9 @@ export function spawnH264PassthroughFFmpeg(audioBitrate: number, frameRate: numb
     "-b:a", String(audioBitrate),
     "-af", "aresample=async=1",
     "-f", "mp4",
+    "-max_interleave_delta", "0",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof+skip_sidx+skip_trailer",
+    "-frag_duration", "1000000",
     "-flush_packets", "1",
     "-max_muxing_queue_size", "4096"
   ];

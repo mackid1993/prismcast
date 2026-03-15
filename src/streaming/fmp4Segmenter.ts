@@ -517,7 +517,10 @@ export function createFMP4Segmenter(options: FMP4SegmenterOptions): FMP4Segmente
       }
     }
 
-    const actualDuration = Math.max(0.1, (mediaDuration > 0) ? mediaDuration : ((Date.now() - state.segmentStartTime) / 1000));
+    const wallClockDuration = (Date.now() - state.segmentStartTime) / 1000;
+    const actualDuration = (process.env.PRISMCAST_CONTAINER === "1") ?
+      Math.max(0.1, wallClockDuration) :
+      Math.max(0.1, (mediaDuration > 0) ? mediaDuration : wallClockDuration);
 
     state.segmentDurations.set(state.segmentIndex, actualDuration);
 
