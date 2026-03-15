@@ -1008,15 +1008,23 @@ export async function setupStream(options: StreamSetupOptions, onCircuitBreak: (
       // Stop the health monitor first.
       stopMonitor();
 
-      // Destroy the raw capture stream BEFORE closing the page. This triggers puppeteer-stream's close handler while the browser is still connected, ensuring
-      // STOP_RECORDING is called and chrome.tabCapture releases the capture. Without this, subsequent getStream() calls may hang with "active stream" errors.
+      // In Docker/GStreamer mode, kill GStreamer+FFmpeg BEFORE destroying the capture stream — GStreamer must release
+      // the X11 display before puppeteer-stream can clean up. On other platforms, destroy the capture stream first
+      // (original order) so puppeteer-stream's STOP_RECORDING fires while the browser is still connected.
+      if(process.env.PRISMCAST_CONTAINER === "1" && ffmpegProcess) {
+
+        ffmpegProcess.kill();
+      }
+
+      // Destroy the raw capture stream. Triggers puppeteer-stream's close handler ensuring STOP_RECORDING is called
+      // and chrome.tabCapture releases the capture.
       if(!rawCaptureStream.destroyed) {
 
         rawCaptureStream.destroy();
       }
 
-      // Kill the FFmpeg process if using WebM+FFmpeg mode.
-      if(ffmpegProcess) {
+      // Kill FFmpeg on non-Docker platforms (original order).
+      if((process.env.PRISMCAST_CONTAINER !== "1") && ffmpegProcess) {
 
         ffmpegProcess.kill();
       }
