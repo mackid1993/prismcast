@@ -727,19 +727,19 @@ export async function createPageWithCapture(options: CreatePageWithCaptureOption
 
   if(process.env.PRISMCAST_CONTAINER === "1") {
 
-    // In Docker with x11grab, set Chrome to fullscreen (F11) so it fills the entire Xvfb screen with no browser chrome.
-    // Requires openbox window manager — without a WM, fullscreen requests are ignored.
-    const cdpSession = await page.createCDPSession();
-    const windowInfo = await cdpSession.send("Browser.getWindowForTarget");
+    // In Docker with x11grab, send F11 via xdotool to trigger true browser fullscreen (hides tabs and address bar).
+    // CDP windowState:fullscreen only maximizes — it doesn't hide Chrome's UI. xdotool sends F11 directly to X11.
+    try {
 
-    await cdpSession.send("Browser.setWindowBounds", {
+      const { execSync } = await import("node:child_process");
 
-      bounds: { windowState: "fullscreen" },
-      windowId: windowInfo.windowId
-    });
+      execSync("xdotool key F11", { env: { ...process.env, DISPLAY: process.env.DISPLAY ?? ":99" } });
+      await delay(500);
+      LOG.info("x11grab: sent F11 via xdotool for true fullscreen.");
+    } catch(err) {
 
-    await cdpSession.detach();
-    LOG.info("x11grab: Chrome set to fullscreen via openbox WM.");
+      LOG.warn("x11grab: xdotool F11 failed: %s. Install xdotool in Docker.", formatError(err));
+    }
   } else {
 
     await resizeAndMinimizeWindow(page, !profile.noVideo);
