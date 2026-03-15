@@ -361,6 +361,7 @@ export function spawnGstreamerCapture(display: string, width: number, height: nu
     "-i", "pipe:0",
     "-thread_queue_size", "512",
     "-fflags", "nobuffer",
+    "-itsoffset", "1",
     "-f", "webm",
     "-i", "pipe:3",
     "-map", "0:v",
